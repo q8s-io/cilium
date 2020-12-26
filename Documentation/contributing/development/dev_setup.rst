@@ -9,6 +9,16 @@
 Development Setup
 =================
 
+Verifying Your Development Setup
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Assuming you have Go installed, you can quickly verify many elements of your
+development setup by running:
+
+::
+
+    $ make dev-doctor
+
 Requirements
 ~~~~~~~~~~~~
 
@@ -50,7 +60,7 @@ Finally, in order to run Cilium locally on VMs, you need:
 +==================================================================================+=======================+================================================================================+
 | `Vagrant <https://www.vagrantup.com/downloads.html>`_                            | >= 2.0                | `Vagrant Install Instructions <https://www.vagrantup.com/docs/installation/>`_ |
 +----------------------------------------------------------------------------------+-----------------------+--------------------------------------------------------------------------------+
-| `VirtualBox <https://www.virtualbox.org/wiki/Downloads>`_ (if not using libvirt) | >= 5.2                | N/A (OS-specific)                                                              |
+| `VirtualBox <https://www.virtualbox.org/wiki/Downloads>`_                        | >= 5.2                | N/A (OS-specific)                                                              |
 +----------------------------------------------------------------------------------+-----------------------+--------------------------------------------------------------------------------+
 
 You should start with the `gs_guide`, which walks you through the set-up, such
@@ -83,6 +93,36 @@ existing cluster. For example, to add a net-next VM to a one-node cluster:
 
     $ NWORKERS=1 NETNEXT=1 ./contrib/vagrant/start.sh k8s2+
 
+Cilium Vagrantfiles look for a file ``.devvmrc`` in the root of your
+Cilium repository. This file is ignored for Git, so it does not exist
+by default. If this file exists and is executable, it will be executed
+in the beginning of the VM bootstrap. This allows you to automatically
+customize the new VM, e.g., with your personal Git configuration. You
+may also want to add any local entries you need in ``/etc/hosts``,
+etc.
+
+For example, you could have something like this in your ``.devvmrc``:
+
+::
+
+    #!/usr/bin/env bash
+
+    git config --global user.name "Firstname Lastname"
+    git config --global user.email developer@company.com
+
+    sudo tee -a /etc/hosts <<EOF
+    192.168.99.99 nas
+    EOF
+
+Remember to make the script executable (``chmod +x .devvmrc``). When
+successfully running, the VM bootstrap shows a message like this right
+after the shared folders have been set up:
+
+::
+
+    runtime: ----------------------------------------------------------------
+    runtime: Executing .devvmrc
+
 The box is currently available for the following providers:
 
 * virtualbox
@@ -110,7 +150,6 @@ brought up by vagrant:
 * ``RUNTIME=x``: Sets up the container runtime to be used inside a kubernetes
   cluster. Valid options are: ``docker``, ``containerd`` and ``crio``. If not
   set, it defaults to ``docker``.
-* ``VAGRANT_DEFAULT_PROVIDER={virtualbox \| libvirt \| ...}``
 * ``VM_SET_PROXY=https://127.0.0.1:80/`` Sets up VM's ``https_proxy``.
 * ``INSTALL=1``: Restarts the installation of Cilium, Kubernetes, etc. Only
   useful when the installation was interrupted.
@@ -326,6 +365,22 @@ commands, respectively:
     $ sudo systemctl status cilium
     $ cilium status
 
+Simple smoke-test with HTTP policies
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+After Cilium daemon has been restarted, you may want to verify that it
+boots up properly and integration with Envoy still works. To do this,
+run this bash test script:
+
+::
+
+    $ tests/envoy-smoke-test.sh
+
+This test launches three docker containers (one curl client, and two
+httpd servers) and tests various simple network policies with
+them. These containers should be automatically removed when the test
+finishes.
+
 Making Changes
 ~~~~~~~~~~~~~~
 
@@ -373,7 +428,8 @@ Let's assume we want to add ``github.com/containernetworking/cni`` version ``v0.
 For a first run, it can take a while as it will download all dependencies to
 your local cache but the remaining runs will be faster.
 
-Updating k8s is a special case, for that one needs to do:
+Updating k8s is a special case which requires updating k8s libraries in a single
+change:
 
 .. code:: bash
 
@@ -385,6 +441,69 @@ Updating k8s is a special case, for that one needs to do:
     $ go mod vendor
     $ make generate-k8s-api
     $ git add go.mod go.sum vendor/
+
+Add/update a new Kubernetes version
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Let's assume we want to add a new Kubernetes version ``v1.19.0``:
+
+#. Follow the above instructions to update the Kubernetes libraries.
+
+#. Follow the next instructions depending on if it is a minor update or a patch
+   update.
+
+Minor version
+^^^^^^^^^^^^^
+
+#. Check if it is possible to remove the last supported Kubernetes version from
+   :ref:`k8scompatibility`, :ref:`k8s_requirements`, :ref:`test_matrix`,
+   :ref:`running_k8s_tests`, and add the new Kubernetes version to that list.
+
+#. If the minimal supported version changed, leave a note in the upgrade guide
+   stating the minimal supported Kubernetes version.
+
+#. If the minimal supported version changed, search over the code, more likely
+   under ``pkg/k8s``, if there is code that can be removed which specifically
+   exists for the compatibility of the previous Kubernetes minimal version
+   supported.
+
+#. If the minimal supported version changed, update the field
+   ``MinimalVersionConstraint`` in ``pkg/k8s/version/version.go``
+
+#. Sync all "``slim``" types by following the instructions in
+   ``pkg/k8s/slim/README.md``.
+
+#. If necessary, update the ``coredns`` files from
+   ``contrib/vagrant/deployments`` with newer versions.
+
+#. Open all files in the ``jenkinsfiles/`` directory, and bump all versions
+   being tested. More important is to make sure the pipeline used on all PRs
+   is running with the new Kubernetes version by default. Make sure the files
+   ``contributing/testing/{ci,e2e.rst}`` are up to date with these changes.
+
+#. Update the Kubernetes version with the newer version in ``test/Vagrantfile``,
+   ``test/test_suite_test.go`` and ``test/vagrant-local-start.sh``.
+
+#. Update the constraint in the function ``getK8sSupportedConstraints``, that
+   exists in the ``test/helpers/utils.go``, with the new Kubernetes version that
+   Cilium supports.
+
+#. Add the new version in ``test/provision/k8s_install.sh``, if it is an RC
+   install it using binaries.
+
+#. Add the new coredns files specific for the Kubernetes version,
+   for ``1.19`` is ``test/provision/manifest/1.19``.
+
+#. Bump the Kubernetes version in ``contrib/vagrant/scripts/helpers.bash``
+
+#. Submit all your changes into a new PR.
+
+Patch version
+^^^^^^^^^^^^^
+
+#. Bump the Kubernetes version in ``contrib/vagrant/scripts/helpers.bash``
+
+#. Submit all your changes into a new PR.
 
 Optional: Docker and IPv6
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -450,7 +569,7 @@ running agent. Debugging of an individual endpoint can be enabled by running
 ``cilium endpoint config ID debug=true``. Running ``cilium monitor -v`` will
 print the normal form of monitor output along with debug messages:
 
-.. code:: shell-session
+.. code-block:: shell-session
 
    $ cilium endpoint config 731 debug=true
    Endpoint 731 configuration updated successfully
@@ -471,7 +590,7 @@ print the normal form of monitor output along with debug messages:
 
 Passing ``-v -v`` supports deeper detail, for example:
 
-.. code:: shell-session
+.. code-block:: shell-session
 
     $ cilium endpoint config 3978 debug=true
     Endpoint 3978 configuration updated successfully

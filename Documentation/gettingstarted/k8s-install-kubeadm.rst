@@ -54,9 +54,10 @@ Deploy Cilium
 
 Deploy Cilium release via Helm:
 
-.. code:: bash
+.. parsed-literal::
 
    helm install cilium |CHART_RELEASE| --namespace kube-system
 
 .. include:: k8s-install-validate.rst
+.. include:: namespace-kube-system.rst
 .. include:: hubble-enable.rst

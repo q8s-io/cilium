@@ -24,7 +24,6 @@ import (
 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/versioncheck"
 
 	"github.com/sirupsen/logrus"
@@ -57,11 +56,11 @@ const (
 	// CNCRDName is the full name of the CN CRD.
 	CNCRDName = k8sconstv2.CNKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 
-	// CLRPCRDNAME is the full name of the CLRP CRD.
-	CLRPCRDNAME = k8sconstv2.CLRPKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+	// CEWCRDName is the full name of the CEW CRD.
+	CEWCRDName = k8sconstv2.CEWKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 
-	// CCLRPCRDNAME is the full name of the CCLRP CRD.
-	CCLRPCRDNAME = k8sconstv2.CCLRPKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+	// CLRPCRDName is the full name of the CLRP CRD.
+	CLRPCRDName = k8sconstv2.CLRPKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 )
 
 var (
@@ -92,18 +91,16 @@ func CreateCustomResourceDefinitions(clientset apiextensionsclient.Interface) er
 		return createNodeCRD(clientset)
 	})
 
-	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD {
-		g.Go(func() error {
-			return createIdentityCRD(clientset)
-		})
-	}
-
 	g.Go(func() error {
-		return createCLRPCRD(clientset)
+		return createCEWCRD(clientset)
 	})
 
 	g.Go(func() error {
-		return createCCLRPCRD(clientset)
+		return createIdentityCRD(clientset)
+	})
+
+	g.Go(func() error {
+		return createCLRPCRD(clientset)
 	})
 
 	return g.Wait()
@@ -132,10 +129,10 @@ func GetPregeneratedCRD(crdName string) apiextensionsv1.CustomResourceDefinition
 		crdBytes, err = examplesCrdsCiliumidentitiesYamlBytes()
 	case CNCRDName:
 		crdBytes, err = examplesCrdsCiliumnodesYamlBytes()
-	case CLRPCRDNAME:
+	case CEWCRDName:
+		crdBytes, err = examplesCrdsCiliumexternalworkloadsYamlBytes()
+	case CLRPCRDName:
 		crdBytes, err = examplesCrdsCiliumlocalredirectpoliciesYamlBytes()
-	case CCLRPCRDNAME:
-		crdBytes, err = examplesCrdsCiliumclusterwidelocalredirectpoliciesYamlBytes()
 	default:
 		scopedLog.Fatal("Pregenerated CRD does not exist")
 	}
@@ -205,6 +202,19 @@ func createNodeCRD(clientset apiextensionsclient.Interface) error {
 	)
 }
 
+// createCEWCRD creates and updates the CiliumExternalWorkload CRD. It should be called on
+// agent startup but is idempotent and safe to call again.
+func createCEWCRD(clientset apiextensionsclient.Interface) error {
+	ciliumCRD := GetPregeneratedCRD(CEWCRDName)
+
+	return createUpdateCRD(
+		clientset,
+		CEWCRDName,
+		constructV1CRD(k8sconstv2.CEWName, ciliumCRD),
+		newDefaultPoller(),
+	)
+}
+
 // createIdentityCRD creates and updates the CiliumIdentity CRD. It should be
 // called on agent startup but is idempotent and safe to call again.
 func createIdentityCRD(clientset apiextensionsclient.Interface) error {
@@ -219,23 +229,12 @@ func createIdentityCRD(clientset apiextensionsclient.Interface) error {
 }
 
 func createCLRPCRD(clientset apiextensionsclient.Interface) error {
-	cLrpCRD := GetPregeneratedCRD(CLRPCRDNAME)
+	cLrpCRD := GetPregeneratedCRD(CLRPCRDName)
 
 	return createUpdateCRD(
 		clientset,
-		CLRPCRDNAME,
+		CLRPCRDName,
 		constructV1CRD(k8sconstv2.CLRPName, cLrpCRD),
-		newDefaultPoller(),
-	)
-}
-
-func createCCLRPCRD(clientset apiextensionsclient.Interface) error {
-	cClrpCRD := GetPregeneratedCRD(CCLRPCRDNAME)
-
-	return createUpdateCRD(
-		clientset,
-		CCLRPCRDNAME,
-		constructV1CRD(k8sconstv2.CCLRPName, cClrpCRD),
 		newDefaultPoller(),
 	)
 }

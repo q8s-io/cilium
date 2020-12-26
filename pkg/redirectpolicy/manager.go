@@ -17,9 +17,11 @@ package redirectpolicy
 import (
 	"fmt"
 	"net"
+	"sync"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/k8s"
-	slimcorev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	slimcorev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
@@ -50,6 +52,10 @@ type svcCache interface {
 	GetServiceFrontendIP(svcID k8s.ServiceID, svcType lb.SVCType) net.IP
 }
 
+type StoreGetter interface {
+	GetStore(name string) cache.Store
+}
+
 // podID is pod name and namespace
 type podID = k8s.ServiceID
 
@@ -64,6 +70,10 @@ type Manager struct {
 	svcManager svcManager
 
 	svcCache svcCache
+
+	storeGetter StoreGetter
+
+	warnOnce sync.Once
 
 	// Mutex to protect against concurrent access to the maps
 	mutex lock.Mutex
@@ -95,11 +105,31 @@ func (rpm *Manager) RegisterSvcCache(cache svcCache) {
 	rpm.svcCache = cache
 }
 
+func (rpm *Manager) RegisterGetStores(sg StoreGetter) {
+	rpm.storeGetter = sg
+}
+
 // Event handlers
 
 // AddRedirectPolicy parses the given local redirect policy config, and updates
 // internal state with the config fields.
-func (rpm *Manager) AddRedirectPolicy(config LRPConfig, podStore cache.Store) (bool, error) {
+func (rpm *Manager) AddRedirectPolicy(config LRPConfig) (bool, error) {
+	rpm.warnOnce.Do(func() {
+		found := false
+		if h := probes.NewProbeManager().GetHelpers("cgroup_sock_addr"); h != nil {
+			if _, ok := h["bpf_sk_lookup_tcp"]; ok {
+				if _, ok = h["bpf_sk_lookup_udp"]; ok {
+					found = true
+				}
+			}
+		}
+		if !found {
+			log.Warn("Without socket lookup kernel functionality, BPF " +
+				"datapath cannot prevent potential loop caused by local-redirect" +
+				"service translation. Needs kernel version >= 5.1")
+		}
+	})
+
 	rpm.mutex.Lock()
 	defer rpm.mutex.Unlock()
 
@@ -127,7 +157,7 @@ func (rpm *Manager) AddRedirectPolicy(config LRPConfig, podStore cache.Store) (b
 			logfields.LRPLocalEndpointSelector: config.backendSelector,
 			logfields.LRPBackendPorts:          config.backendPorts,
 		}).Debug("Add local redirect policy")
-		pods := rpm.getLocalPodsForPolicy(&config, podStore)
+		pods := rpm.getLocalPodsForPolicy(&config)
 		if len(pods) == 0 {
 			return true, nil
 		}
@@ -143,7 +173,7 @@ func (rpm *Manager) AddRedirectPolicy(config LRPConfig, podStore cache.Store) (b
 			logfields.LRPBackendPorts:          config.backendPorts,
 		}).Debug("Add local redirect policy")
 
-		rpm.getAndUpsertPolicySvcConfig(&config, podStore)
+		rpm.getAndUpsertPolicySvcConfig(&config)
 	}
 
 	return true, nil
@@ -189,7 +219,7 @@ func (rpm *Manager) DeleteRedirectPolicy(config LRPConfig) error {
 
 // OnAddService handles Kubernetes service (clusterIP type) add events, and
 // updates the internal state for the policy config associated with the service.
-func (rpm *Manager) OnAddService(svcID k8s.ServiceID, podStore cache.Store) {
+func (rpm *Manager) OnAddService(svcID k8s.ServiceID) {
 	rpm.mutex.Lock()
 	defer rpm.mutex.Unlock()
 	if len(rpm.policyConfigs) == 0 {
@@ -203,7 +233,7 @@ func (rpm *Manager) OnAddService(svcID k8s.ServiceID, podStore cache.Store) {
 		if !config.checkNamespace(svcID.Namespace) {
 			return
 		}
-		rpm.getAndUpsertPolicySvcConfig(config, podStore)
+		rpm.getAndUpsertPolicySvcConfig(config)
 	}
 }
 
@@ -245,11 +275,12 @@ func (rpm *Manager) OnUpdatePodLocked(pod *slimcorev1.Pod, removeOld bool, upser
 		return
 	}
 
-	podIPs, err := k8sUtils.ValidIPs(pod.Status)
-	if err != nil {
+	podIPs := k8sUtils.ValidIPs(pod.Status)
+	if len(podIPs) == 0 {
 		return
 	}
 	var podData *podMetadata
+	var err error
 	if podData, err = rpm.getPodMetadata(pod, podIPs); err != nil {
 		log.WithError(err).WithFields(logrus.Fields{
 			logfields.K8sPodName:   pod.Name,
@@ -305,12 +336,6 @@ func (rpm *Manager) OnDeletePod(pod *slimcorev1.Pod) {
 	}
 }
 
-// podPolicyInfo stores information about the policy that selects the pod and pod backend(s)
-type podPolicyInfo struct {
-	policyID policyID
-	backends []backend
-}
-
 // podMetadata stores relevant metadata associated with a pod that's updated during pod
 // add/update events
 type podMetadata struct {
@@ -327,7 +352,7 @@ type podMetadata struct {
 
 // getAndUpsertPolicySvcConfig gets service frontends for the given config service
 // and upserts the service frontends.
-func (rpm *Manager) getAndUpsertPolicySvcConfig(config *LRPConfig, podStore cache.Store) {
+func (rpm *Manager) getAndUpsertPolicySvcConfig(config *LRPConfig) {
 	switch config.frontendType {
 	case svcFrontendAll:
 		// Get all the service frontends.
@@ -362,11 +387,10 @@ func (rpm *Manager) getAndUpsertPolicySvcConfig(config *LRPConfig, podStore cach
 		}
 	}
 
-	pods := rpm.getLocalPodsForPolicy(config, podStore)
+	pods := rpm.getLocalPodsForPolicy(config)
 	if len(pods) > 0 {
 		rpm.processConfig(config, pods...)
 	}
-
 }
 
 // storePolicyConfig stores various state for the given policy config.
@@ -439,10 +463,12 @@ func (rpm *Manager) notifyPolicyBackendDelete(config *LRPConfig, frontendMapping
 			log.WithError(err).Errorf("Local redirect service for policy (%v)"+
 				" with frontend (%v) not deleted", config.id, frontendMapping.feAddr)
 		}
-		if restored := rpm.svcCache.EnsureService(*config.serviceID, lock.NewStoppableWaitGroup()); restored {
-			log.WithFields(logrus.Fields{
-				logfields.K8sSvcID: *config.serviceID,
-			}).Info("Restored service")
+		if config.lrpType == lrpConfigTypeSvc {
+			if restored := rpm.svcCache.EnsureService(*config.serviceID, lock.NewStoppableWaitGroup()); restored {
+				log.WithFields(logrus.Fields{
+					logfields.K8sSvcID: *config.serviceID,
+				}).Info("Restored service")
+			}
 		}
 	}
 }
@@ -481,7 +507,7 @@ func (rpm *Manager) upsertService(config *LRPConfig, frontendMapping *feMapping)
 		L3n4Addr: *frontendMapping.feAddr,
 		ID:       lb.ID(0),
 	}
-	var backendAddrs []lb.Backend
+	backendAddrs := make([]lb.Backend, 0, len(frontendMapping.podBackends))
 	for _, be := range frontendMapping.podBackends {
 		backendAddrs = append(backendAddrs, lb.Backend{
 			NodeName: nodeTypes.GetName(),
@@ -503,19 +529,21 @@ func (rpm *Manager) upsertService(config *LRPConfig, frontendMapping *feMapping)
 }
 
 // Returns a slice of endpoint pods metadata that are selected by the given policy config.
-func (rpm *Manager) getLocalPodsForPolicy(config *LRPConfig, podStore cache.Store) []*podMetadata {
+func (rpm *Manager) getLocalPodsForPolicy(config *LRPConfig) []*podMetadata {
 	var (
 		retPods []*podMetadata
 		podData *podMetadata
+		err     error
 	)
 
+	podStore := rpm.storeGetter.GetStore("pod")
 	for _, podItem := range podStore.List() {
 		pod, ok := podItem.(*slimcorev1.Pod)
 		if !ok || !config.checkNamespace(pod.GetNamespace()) {
 			continue
 		}
-		podIPs, err := k8sUtils.ValidIPs(pod.Status)
-		if err != nil {
+		podIPs := k8sUtils.ValidIPs(pod.Status)
+		if len(podIPs) == 0 {
 			continue
 		}
 		if podData, err = rpm.getPodMetadata(pod, podIPs); err != nil {
@@ -779,4 +807,16 @@ func (rpm *Manager) getPodMetadata(pod *slimcorev1.Pod, podIPs []string) (*podMe
 			Namespace: pod.GetNamespace(),
 		},
 	}, nil
+}
+
+func (rpm *Manager) GetLRPs() []*LRPConfig {
+	rpm.mutex.Lock()
+	defer rpm.mutex.Unlock()
+
+	lrps := make([]*LRPConfig, 0, len(rpm.policyConfigs))
+	for _, lrp := range rpm.policyConfigs {
+		lrps = append(lrps, lrp)
+	}
+
+	return lrps
 }

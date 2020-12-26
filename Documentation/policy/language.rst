@@ -226,6 +226,26 @@ be only accessible if the source endpoint also has the label ``env=prod``.
 
         .. literalinclude:: ../../examples/policies/l3/requires/requires.json
 
+This ``fromRequires`` rule doesn't allow anything on its own and needs to be
+combined with other rules to allow traffic. For example, when combined with the
+example policy below, the endpoint with label ``env=prod`` will become
+accessible from endpoints that have both labels ``env=prod`` and
+``role=frontend``.
+
+.. only:: html
+
+   .. tabs::
+     .. group-tab:: k8s YAML
+
+        .. literalinclude:: ../../examples/policies/l3/requires/endpoints.yaml
+     .. group-tab:: JSON
+
+        .. literalinclude:: ../../examples/policies/l3/requires/endpoints.json
+
+.. only:: epub or latex
+
+        .. literalinclude:: ../../examples/policies/l3/requires/endpoints.json
+
 .. _Services based:
 
 Services based
@@ -513,8 +533,8 @@ IPs to be allowed are selected via:
 
 ``toFQDNs.matchPattern``
   Inserts IPs of domains that match the pattern in ``matchPattern``, accounting
-  for wildcards. Patterns are composed of literal characters that that are
-  allowed in domain names: a-z, 0-9, ``.`` and ``-``.
+  for wildcards. Patterns are composed of literal characters that are allowed
+  in domain names: a-z, 0-9, ``.`` and ``-``.
 
   ``*`` is allowed as a wildcard with a number of convenience behaviors:
 
@@ -525,6 +545,12 @@ IPs to be allowed are selected via:
   * ``*`` alone matches all names, and inserts all cached DNS IPs into this
     rule.
 
+The example below allows all DNS traffic on port 53 to the DNS service and
+intercepts it via the `DNS Proxy`_. If using a non-standard DNS port for
+a DNS application behind a Kubernetes service, the port must match the backend
+port. When the application makes a request for my-remote-service.com, Cilium
+learns the IP address and will allow traffic due to the match on the name under
+the ``toFQDNs.matchName`` rule.
 
 Example
 ~~~~~~~
@@ -828,11 +854,12 @@ While communicating on this port, the only API endpoints allowed will be ``GET
 
         .. literalinclude:: ../../examples/policies/l7/http/http.json
 
+.. _kafka_policy:
 
 Kafka (beta)
 ------------
 
-.. note:: Kafka support is currently in beta phase.
+.. include:: ../beta.rst
 
 PortRuleKafka is a list of Kafka protocol constraints. All fields are optional,
 if all fields are empty or missing, the rule will match all Kafka messages.
@@ -1193,7 +1220,7 @@ each selected node, they apply only to the host namespace, including
 host-networking pods. They therefore don't apply to communications between
 non-host-networking pods and locations outside of the cluster.
 
-Installation of Host Policies requires the the addition of the following ``helm``
+Installation of Host Policies requires the addition of the following ``helm``
 flags when installing Cilium:
 
 * ``--set devices='{interface}'`` where ``interface`` refers to the
@@ -1205,7 +1232,7 @@ The following policy will allow ingress traffic for any node with the label
 ``type=ingress-worker`` on TCP ports 22, 6443 (kube-apiserver), 2379 (etcd) and 4240
 (health checks), as well as UDP port 8472 (VXLAN).
 
-Replace the ``port:`` value with ports used in your environment. 
+Replace the ``port:`` value with ports used in your environment.
 
 .. only:: html
 

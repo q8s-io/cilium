@@ -4,6 +4,7 @@ dir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
 restart_env=$(env | grep -f $dir/restart-vars | tr '\n' ' ')
 echo "$restart_env $0 $@" > "$dir/restart.sh"
+chmod a+x "$dir/restart.sh"
 
 # Master's IPv4 address. Workers' IPv4 address will have their IP incremented by
 # 1. The netmask used will be /24
@@ -42,8 +43,6 @@ export 'VM_CPUS'=${VM_CPUS:-2}
 # VM_BASENAME tag is only set if K8S option is active
 export 'VM_BASENAME'="runtime"
 export 'VM_BASENAME'=${K8S+"k8s"}
-# Set VAGRANT_DEFAULT_PROVIDER to virtualbox
-export 'VAGRANT_DEFAULT_PROVIDER'=${VAGRANT_DEFAULT_PROVIDER:-"virtualbox"}
 # Sets the default cilium TUNNEL_MODE to "vxlan"
 export 'TUNNEL_MODE_STRING'=${TUNNEL_MODE_STRING:-"-t vxlan"}
 # Replies Yes to all prompts asked in this script
@@ -577,9 +576,7 @@ function vboxnet_addr_finder(){
     vboxnet_add_ipv4 "${vboxnetname}" "${IPV4_BASE_ADDR_NFS}" "255.255.255.0"
 }
 
-if [[ "${VAGRANT_DEFAULT_PROVIDER}" -eq "virtualbox" ]]; then
-     vboxnet_addr_finder
-fi
+vboxnet_addr_finder
 
 ipv6_public_workers_addrs=()
 
@@ -606,7 +603,7 @@ elif [ -n "${PROVISION}" ]; then
 else
     vagrant up $PROVISION_ARGS $1
     if [ "$?" -eq "0" -a -n "${K8S}" ]; then
-        host_port=$(vagrant port --guest 6443)
+        host_port=$(vagrant port --guest 6443 k8s1)
         vagrant ssh k8s1 -- cat /home/vagrant/.kube/config | sed "s;server:.*:6443;server: https://k8s1:$host_port;g" > vagrant.kubeconfig
         echo "Add '127.0.0.1 k8s1' to your /etc/hosts to use vagrant.kubeconfig file for kubectl"
     fi

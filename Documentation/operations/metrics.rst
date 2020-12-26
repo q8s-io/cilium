@@ -55,16 +55,16 @@ annotations. They can be used to signal Prometheus whether to scrape metrics:
 
 .. code-block:: yaml
 
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
+        prometheus.io/scrape: true
+        prometheus.io/port: 9090
 
 To collect Envoy metrics the Cilium chart will create a Kubernetes headless
 service named ``cilium-agent`` with the ``prometheus.io/scrape:'true'`` annotation set:
 
 .. code-block:: yaml
 
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9095"
+        prometheus.io/scrape: true
+        prometheus.io/port: 9095
 
 This additional headless service in addition to the other Cilium components is needed
 as each component can only have one Prometheus scrape and port annotation.
@@ -110,11 +110,15 @@ section for the full list of available metrics and their options.
 
    helm install cilium |CHART_RELEASE| \\
      --namespace kube-system \\
-     --set hubble.enabled=true \\
-     --set hubble.metrics.enabled="{dns,drop,tcp,flow,port-distribution,icmp,http}"
+     --set hubble.metrics.enabled="{dns,drop,tcp,flow,icmp,http}"
 
 The port of the Hubble metrics can be configured with the
 ``hubble.metrics.port`` Helm value.
+
+.. Note::
+
+    L7 metrics such as HTTP, are only emitted for pods that enable
+    :ref:`Layer 7 Protocol Visibility <proxy_visibility>`.
 
 When deployed with a non-empty ``hubble.metrics.enabled`` Helm value, the
 Cilium chart will create a Kubernetes headless service named ``hubble-metrics``
@@ -122,8 +126,8 @@ with the ``prometheus.io/scrape:'true'`` annotation set:
 
 .. code-block:: yaml
 
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9091"
+        prometheus.io/scrape: true
+        prometheus.io/port: 9091
 
 Set the following options in the ``scrape_configs`` section of Prometheus to
 have it scrape all Hubble metrics from the endpoints automatically:
@@ -189,8 +193,6 @@ Endpoint
 Name                                         Labels                                             Description
 ============================================ ================================================== ========================================================
 ``endpoint``                                                                                    Number of endpoints managed by this agent
-``endpoint_count``                                                                              Number of endpoints managed by this agent (deprecated,  use ``endpoint``)
-``endpoint_regenerations``                   ``outcome``                                        Count of all endpoint regenerations that have completed (deprecated,  use ``endpoint_regenerations_total``)
 ``endpoint_regenerations_total``             ``outcome``                                        Count of all endpoint regenerations that have completed
 ``endpoint_regeneration_time_stats_seconds`` ``scope``                                          Endpoint regeneration time stats
 ``endpoint_state``                           ``state``                                          Count of all endpoints
@@ -258,7 +260,6 @@ Name                                       Labels                               
 ``policy_regeneration_total``                                                                 Total number of policies regenerated successfully
 ``policy_regeneration_time_stats_seconds`` ``scope``                                          Policy regeneration time stats labeled by the scope
 ``policy_max_revision``                                                                       Highest policy revision number in the agent
-``policy_import_errors``                                                                      Number of times a policy import has failed (deprecated, use ``policy_import_errors_total``)
 ``policy_import_errors_total``                                                                Number of times a policy import has failed
 ``policy_endpoint_enforcement_status``                                                        Number of endpoints labeled by policy enforcement status
 ========================================== ================================================== ========================================================
@@ -281,7 +282,6 @@ Identity
 Name                                     Labels                                             Description
 ======================================== ================================================== ========================================================
 ``identity``                                                                                Number of identities currently allocated
-``identity_count``                                                                          Number of identities currently allocated (deprecated, use ``identity``)
 ======================================== ================================================== ========================================================
 
 Events external to Cilium
@@ -404,12 +404,12 @@ IPAM
 Name                                     Labels                                                            Description
 ======================================== ================================================================= ========================================================
 ``ipam_ips``                             ``type``                                                          Number of IPs allocated
-``ipam_allocation_ops``                  ``subnetId`` (deprecated), ``subnet_id``                          Number of IP allocation operations. ``subnetId`` is deprecated and will be removed in 1.10. Use ``subnet_id`` instead.
-``ipam_interface_creation_ops``          ``subnetId`` (deprecated), ``subnet_id``, ``status``              Number of interfaces creation operations. ``subnetId`` is deprecated and will be removed in 1.10. Use ``subnet_id`` instead.
+``ipam_allocation_ops``                  ``subnet_id``                                                     Number of IP allocation operations.
+``ipam_interface_creation_ops``          ``subnet_id``, ``status``                                         Number of interfaces creation operations.
 ``ipam_available``                                                                                         Number of interfaces with addresses available
 ``ipam_nodes_at_capacity``                                                                                 Number of nodes unable to allocate more addresses
 ``ipam_resync_total``                                                                                      Number of synchronization operations with external IPAM API
-``ipam_api_duration_seconds``            ``operation``, ``responseCode`` (deprecated), ``response_code``   Duration of interactions with external IPAM API. ``responseCode`` is deprecated and will be removed in 1.10. Use ``response_code`` instead.
+``ipam_api_duration_seconds``            ``operation``, ``response_code``                                  Duration of interactions with external IPAM API.
 ``ipam_api_rate_limit_duration_seconds`` ``operation``                                                     Duration of rate limiting while accessing external IPAM API
 ======================================== ================================================================= ========================================================
 
@@ -428,7 +428,7 @@ interfaces. ``--hubble-metrics`` takes a comma-separated list of metrics.
 
 Some metrics can take additional semicolon-separated options per metric, e.g.
 ``--hubble-metrics="dns:query;ignoreAAAA,http:destinationContext=pod-short"``
-will enable the the ``dns`` metric with the ``query`` and ``ignoreAAAA`` options,
+will enable the ``dns`` metric with the ``query`` and ``ignoreAAAA`` options,
 and the ``http`` metric with the ``destinationContext=pod-short`` option.
 
 .. _hubble_context_options:

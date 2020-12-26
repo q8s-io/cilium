@@ -23,6 +23,9 @@ import (
 const (
 	// EndpointGCIntervalDefault is the default time for the CEP GC
 	EndpointGCIntervalDefault = 5 * time.Minute
+
+	// PrometheusServeAddr is the default server address for operator metrics
+	PrometheusServeAddr = ":6942"
 )
 
 const (
@@ -155,8 +158,9 @@ const (
 	// for retrieving Azure API credentials
 	AzureUserAssignedIdentityID = "azure-user-assigned-identity-id"
 
-	// CRDWaitTimeout it the time after which Cilium CRDs have to be available.
-	CRDWaitTimeout = "crd-wait-timeout"
+	// AzureUsePrimaryAddress specify wether we should use or ignore the interface's
+	// primary IPConfiguration
+	AzureUsePrimaryAddress = "azure-use-primary-address"
 
 	// LeaderElectionLeaseDuration is the duration that non-leader candidates will wait to
 	// force acquire leadership
@@ -294,8 +298,9 @@ type OperatorConfig struct {
 	// for retrieving Azure API credentials
 	AzureUserAssignedIdentityID string
 
-	// CRDWaitTimeout it the time after which Cilium CRDs have to be available.
-	CRDWaitTimeout time.Duration
+	// AzureUsePrimaryAddress specify wether we should use or ignore the interface's
+	// primary IPConfiguration
+	AzureUsePrimaryAddress bool
 
 	// LeaderElectionLeaseDuration is the duration that non-leader candidates will wait to
 	// force acquire leadership in Cilium Operator HA deployment.
@@ -331,7 +336,6 @@ func (c *OperatorConfig) Populate() {
 	c.ClusterPoolIPv4CIDR = viper.GetStringSlice(ClusterPoolIPv4CIDR)
 	c.ClusterPoolIPv6CIDR = viper.GetStringSlice(ClusterPoolIPv6CIDR)
 	c.NodesGCInterval = viper.GetDuration(NodesGCInterval)
-	c.CRDWaitTimeout = viper.GetDuration(CRDWaitTimeout)
 	c.LeaderElectionLeaseDuration = viper.GetDuration(LeaderElectionLeaseDuration)
 	c.LeaderElectionRenewDeadline = viper.GetDuration(LeaderElectionRenewDeadline)
 	c.LeaderElectionRetryPeriod = viper.GetDuration(LeaderElectionRetryPeriod)
@@ -348,6 +352,7 @@ func (c *OperatorConfig) Populate() {
 	c.AzureCloudName = viper.GetString(AzureCloudName)
 	c.AzureSubscriptionID = viper.GetString(AzureSubscriptionID)
 	c.AzureResourceGroup = viper.GetString(AzureResourceGroup)
+	c.AzureUsePrimaryAddress = viper.GetBool(AzureUsePrimaryAddress)
 	c.AzureUserAssignedIdentityID = viper.GetString(AzureUserAssignedIdentityID)
 
 	// Option maps and slices

@@ -12,7 +12,7 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-// +build !privileged_tests
+// +build privileged_tests
 
 package redirectpolicy
 
@@ -22,13 +22,14 @@ import (
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/k8s"
-	slimcorev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	slimcorev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/utils"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/policy/api"
 
 	. "gopkg.in/check.v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 // Hook up gocheck into the "go test" runner.
@@ -98,12 +99,20 @@ func (ps *fakePodStore) Resync() error {
 	return nil
 }
 
+type fakePodStoreGetter struct {
+	ps *fakePodStore
+}
+
+func (psg *fakePodStoreGetter) GetStore(name string) cache.Store {
+	return psg.ps
+}
+
 var (
-	tcpStr = "TCP"
-	udpStr = "UDP"
-	proto1 = lb.NewL4Type(tcpStr)
-	proto2 = lb.NewL4Type(udpStr)
-	fe1    = lb.NewL3n4Addr(
+	tcpStr    = "TCP"
+	udpStr    = "UDP"
+	proto1, _ = lb.NewL4Type(tcpStr)
+	proto2, _ = lb.NewL4Type(udpStr)
+	fe1       = lb.NewL3n4Addr(
 		proto1,
 		net.ParseIP("1.1.1.1"),
 		80,
@@ -285,7 +294,7 @@ func (m *ManagerSuite) TestManager_AddRedirectPolicy_AddrMatcherDuplicateConfig(
 	dupConfigFe := configFe
 	dupConfigFe.id.Name = "test-foo2"
 
-	added, err := m.rpm.AddRedirectPolicy(dupConfigFe, nil)
+	added, err := m.rpm.AddRedirectPolicy(dupConfigFe)
 
 	c.Assert(added, Equals, false)
 	c.Assert(err, NotNil)
@@ -303,7 +312,7 @@ func (m *ManagerSuite) TestManager_AddRedirectPolicy_SvcMatcherDuplicateConfig(c
 	invalidConfigSvc := configSvc
 	invalidConfigSvc.id.Name = "test-foo3"
 
-	added, err := m.rpm.AddRedirectPolicy(invalidConfigSvc, nil)
+	added, err := m.rpm.AddRedirectPolicy(invalidConfigSvc)
 
 	c.Assert(added, Equals, false)
 	c.Assert(err, NotNil)
@@ -314,7 +323,7 @@ func (m *ManagerSuite) TestManager_AddRedirectPolicy_SvcMatcherDuplicateConfig(c
 func (m *ManagerSuite) TestManager_AddrMatcherConfigSinglePort(c *C) {
 	// Add an addressMatcher type LRP with single port. The policy config
 	// frontend should have 2 pod backends with each of the podIPs.
-	podIPs, _ := utils.ValidIPs(pod1.Status)
+	podIPs := utils.ValidIPs(pod1.Status)
 	expectedbes := make([]backend, len(podIPs))
 	for i := range podIPs {
 		expectedbes[i] = backend{
@@ -323,7 +332,9 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigSinglePort(c *C) {
 		}
 	}
 
-	added, err := m.rpm.AddRedirectPolicy(configAddrType, &fakePodStore{})
+	m.rpm.RegisterGetStores(&fakePodStoreGetter{ps: &fakePodStore{}})
+
+	added, err := m.rpm.AddRedirectPolicy(configAddrType)
 
 	c.Assert(added, Equals, true)
 	c.Assert(err, IsNil)
@@ -345,7 +356,7 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigSinglePort(c *C) {
 	pod3 := pod2.DeepCopy()
 	pod3.Labels["test"] = "foo"
 	pod3ID := pod2ID
-	podIPs, _ = utils.ValidIPs(pod3.Status)
+	podIPs = utils.ValidIPs(pod3.Status)
 	expectedbes2 := make([]backend, 0, len(expectedbes)+len(podIPs))
 	expectedbes2 = append(expectedbes2, expectedbes...)
 	for i := range podIPs {
@@ -424,7 +435,7 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigMultiplePorts(c *C) {
 	configAddrType.backendPortsByPortName = map[string]*bePortInfo{
 		beP1.name: &configAddrType.backendPorts[0],
 		beP2.name: &configAddrType.backendPorts[1]}
-	podIPs, _ := utils.ValidIPs(pod1.Status)
+	podIPs := utils.ValidIPs(pod1.Status)
 	expectedbes := make([]backend, 0, len(podIPs))
 	for i := range podIPs {
 		expectedbes = append(expectedbes, backend{
@@ -433,7 +444,9 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigMultiplePorts(c *C) {
 		})
 	}
 
-	added, err := m.rpm.AddRedirectPolicy(configAddrType, &fakePodStore{})
+	m.rpm.RegisterGetStores(&fakePodStoreGetter{ps: &fakePodStore{}})
+
+	added, err := m.rpm.AddRedirectPolicy(configAddrType)
 
 	c.Assert(added, Equals, true)
 	c.Assert(err, IsNil)
@@ -492,7 +505,7 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigDualStack(c *C) {
 	// Only ipv4 backend(s) for ipv4 frontend
 	pod3 := pod1.DeepCopy()
 	pod3ID := pod1ID
-	podIPs, _ := utils.ValidIPs(pod3.Status)
+	podIPs := utils.ValidIPs(pod3.Status)
 	expectedbes4 := make([]backend, 0, len(podIPs))
 	for i := range podIPs {
 		expectedbes4 = append(expectedbes4, backend{
@@ -506,11 +519,16 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigDualStack(c *C) {
 		podID:    pod3ID,
 	}}
 	pod3.Status.PodIPs = append(pod3.Status.PodIPs, pod3v6)
-	ps := &fakePodStore{OnList: func() []interface{} {
-		return []interface{}{pod3}
-	}}
+	psg := &fakePodStoreGetter{
+		&fakePodStore{
+			OnList: func() []interface{} {
+				return []interface{}{pod3}
+			},
+		},
+	}
+	m.rpm.RegisterGetStores(psg)
 
-	added, err := m.rpm.AddRedirectPolicy(configAddrType, ps)
+	added, err := m.rpm.AddRedirectPolicy(configAddrType)
 
 	c.Assert(added, Equals, true)
 	c.Assert(err, IsNil)
@@ -529,7 +547,7 @@ func (m *ManagerSuite) TestManager_AddrMatcherConfigDualStack(c *C) {
 	configAddrType.id.Name = "test-bar"
 	configAddrType.frontendMappings = feM
 
-	added, err = m.rpm.AddRedirectPolicy(configAddrType, ps)
+	added, err = m.rpm.AddRedirectPolicy(configAddrType)
 
 	c.Assert(added, Equals, true)
 	c.Assert(err, IsNil)

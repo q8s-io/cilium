@@ -35,7 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/k8s"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
-	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/lock"
@@ -475,6 +475,13 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 				return "", err
 			}
 			return p.Annotations[bandwidth.EgressBandwidth], nil
+		})
+		ep.UpdateNoTrackRules(func(ns, podName string) (noTrackPort string, err error) {
+			p, err := d.k8sWatcher.GetCachedPod(ns, podName)
+			if err != nil {
+				return "", err
+			}
+			return p.Annotations[annotation.NoTrack], nil
 		})
 	}
 

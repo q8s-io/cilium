@@ -20,11 +20,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/cilium/cilium/pkg/bpf"
-	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/cgroups"
 	"github.com/cilium/cilium/pkg/command/exec"
 	"github.com/cilium/cilium/pkg/common"
@@ -51,6 +49,8 @@ const (
 	initArgIPv6NodeIP
 	initArgMode
 	initArgDevices
+	initArgHostDev1
+	initArgHostDev2
 	initArgXDPDevice
 	initArgXDPMode
 	initArgMTU
@@ -64,8 +64,6 @@ const (
 	initArgNodePort
 	initArgNodePortBind
 	initBPFCPU
-	initArgNodePortIPv4Addrs
-	initArgNodePortIPv6Addrs
 	initArgNrCPUs
 	initArgEndpointRoutes
 	initArgMax
@@ -118,13 +116,7 @@ func writePreFilterHeader(preFilter *prefilter.PreFilter, dir string) error {
 	return fw.Flush()
 }
 
-type setting struct {
-	name      string
-	val       string
-	ignoreErr bool
-}
-
-func addENIRules(sysSettings []setting) ([]setting, error) {
+func addENIRules(sysSettings []sysctl.Setting) ([]sysctl.Setting, error) {
 	// AWS ENI mode requires symmetric routing, see
 	// iptables.addCiliumENIRules().
 	// The default AWS daemonset installs the following rules that are used
@@ -151,10 +143,10 @@ func addENIRules(sysSettings []setting) ([]setting, error) {
 		return nil, fmt.Errorf("failed to find interface with default route: %w", err)
 	}
 
-	retSettings := append(sysSettings, setting{
-		fmt.Sprintf("net.ipv4.conf.%s.rp_filter", iface.Attrs().Name),
-		"2",
-		false,
+	retSettings := append(sysSettings, sysctl.Setting{
+		Name:      fmt.Sprintf("net.ipv4.conf.%s.rp_filter", iface.Attrs().Name),
+		Val:       "2",
+		IgnoreErr: false,
 	})
 	if err := route.ReplaceRule(route.Rule{
 		Priority: linux_defaults.RulePriorityNodeport,
@@ -180,11 +172,11 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 
 	args = make([]string, initArgMax)
 
-	sysSettings := []setting{
-		{"net.core.bpf_jit_enable", "1", true},
-		{"net.ipv4.conf.all.rp_filter", "0", false},
-		{"kernel.unprivileged_bpf_disabled", "1", true},
-		{"kernel.timer_migration", "0", true},
+	sysSettings := []sysctl.Setting{
+		{Name: "net.core.bpf_jit_enable", Val: "1", IgnoreErr: true},
+		{Name: "net.ipv4.conf.all.rp_filter", Val: "0", IgnoreErr: false},
+		{Name: "kernel.unprivileged_bpf_disabled", Val: "1", IgnoreErr: true},
+		{Name: "kernel.timer_migration", Val: "0", IgnoreErr: true},
 	}
 
 	// Lock so that endpoints cannot be built while we are compile base programs.
@@ -241,7 +233,7 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		// interface (https://github.com/docker/libnetwork/issues/1720)
 		// Enable IPv6 for now
 		sysSettings = append(sysSettings,
-			setting{"net.ipv6.conf.all.disable_ipv6", "0", false})
+			sysctl.Setting{Name: "net.ipv6.conf.all.disable_ipv6", Val: "0", IgnoreErr: false})
 	} else {
 		args[initArgIPv6NodeIP] = "<nil>"
 	}
@@ -278,13 +270,15 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgEncryptInterface] = "<nil>"
 	}
 
+	devices := make([]netlink.Link, 0, len(option.Config.Devices))
 	if len(option.Config.Devices) != 0 {
 		for _, device := range option.Config.Devices {
-			_, err := netlink.LinkByName(device)
+			link, err := netlink.LinkByName(device)
 			if err != nil {
 				log.WithError(err).WithField("device", device).Warn("Link does not exist")
 				return err
 			}
+			devices = append(devices, link)
 		}
 		args[initArgDevices] = strings.Join(option.Config.Devices, ";")
 	} else if option.Config.IsFlannelMasterDeviceSet() {
@@ -293,45 +287,23 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgDevices] = "<nil>"
 	}
 
+	var mode baseDeviceMode
 	switch {
 	case option.Config.IsFlannelMasterDeviceSet():
-		args[initArgMode] = "flannel"
+		mode = flannelMode
 	case option.Config.Tunnel != option.TunnelDisabled:
-		args[initArgMode] = option.Config.Tunnel
+		mode = baseDeviceMode(option.Config.Tunnel)
 	case option.Config.DatapathMode == datapathOption.DatapathModeIpvlan:
-		args[initArgMode] = "ipvlan"
+		mode = ipvlanMode
 	default:
-		args[initArgMode] = "direct"
+		mode = directMode
 	}
+	args[initArgMode] = string(mode)
 
 	if option.Config.EnableNodePort {
 		args[initArgNodePort] = "true"
-		if option.Config.EnableIPv4 {
-			addrs := node.GetNodePortIPv4AddrsWithDevices()
-			tmp := make([]string, 0, len(addrs))
-			for iface, ipv4 := range addrs {
-				tmp = append(tmp,
-					fmt.Sprintf("%s=%#x", iface,
-						byteorder.HostSliceToNetwork(ipv4, reflect.Uint32).(uint32)))
-			}
-			args[initArgNodePortIPv4Addrs] = strings.Join(tmp, ";")
-		} else {
-			args[initArgNodePortIPv4Addrs] = "<nil>"
-		}
-		if option.Config.EnableIPv6 {
-			addrs := node.GetNodePortIPv6AddrsWithDevices()
-			tmp := make([]string, 0, len(addrs))
-			for iface, ipv6 := range addrs {
-				tmp = append(tmp, fmt.Sprintf("%s=%s", iface, common.GoArray2CNoSpaces(ipv6)))
-			}
-			args[initArgNodePortIPv6Addrs] = strings.Join(tmp, ";")
-		} else {
-			args[initArgNodePortIPv6Addrs] = "<nil>"
-		}
 	} else {
 		args[initArgNodePort] = "false"
-		args[initArgNodePortIPv4Addrs] = "<nil>"
-		args[initArgNodePortIPv6Addrs] = "<nil>"
 	}
 
 	if option.Config.NodePortBindProtection {
@@ -362,22 +334,18 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		}
 	}
 
-	for _, s := range sysSettings {
-		log.WithFields(logrus.Fields{
-			logfields.SysParamName:  s.name,
-			logfields.SysParamValue: s.val,
-		}).Info("Setting sysctl")
-		if err := sysctl.Write(s.name, s.val); err != nil {
-			if !s.ignoreErr {
-				return fmt.Errorf("Failed to sysctl -w %s=%s: %s", s.name, s.val, err)
-			}
-			log.WithError(err).WithFields(logrus.Fields{
-				logfields.SysParamName:  s.name,
-				logfields.SysParamValue: s.val,
-			}).Warning("Failed to sysctl -w")
-		}
-	}
+	sysctl.ApplySettings(sysSettings)
 
+	// Datapath initialization
+	hostDev1, hostDev2, err := setupBaseDevice(devices, mode, deviceMTU)
+	if err != nil {
+		return err
+	}
+	args[initArgHostDev1] = hostDev1.Attrs().Name
+	args[initArgHostDev2] = hostDev2.Attrs().Name
+
+	// "Legacy" datapath inizialization with the init.sh script
+	// TODO(mrostecki): Rewrite the whole init.sh in Go, step by step.
 	for i, arg := range args {
 		if arg == "" {
 			log.Warningf("empty argument passed to bpf/init.sh at position %d", i)

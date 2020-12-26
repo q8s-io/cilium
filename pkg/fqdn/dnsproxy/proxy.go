@@ -119,8 +119,16 @@ type DNSProxy struct {
 	// helpers.go but is modified during testing.
 	lookupTargetDNSServer func(w dns.ResponseWriter) (serverIP net.IP, serverPort uint16, addrStr string, err error)
 
+	// maxIPsPerRestoredDNSRule is the maximum number of IPs to maintain for each
+	// restored DNS rule.
+	maxIPsPerRestoredDNSRule int
+
 	// this mutex protects variables below this point
 	lock.Mutex
+
+	// usedServers is the set of DNS servers that have been allowed and used successfully.
+	// This is used to limit the number of IPs we store for restored DNS rules.
+	usedServers map[string]struct{}
 
 	// allowed tracks all allowed L7 DNS rules by endpointID, destination port,
 	// and L3 Selector. All must match for a query to be allowed.
@@ -182,32 +190,39 @@ func (p *DNSProxy) GetRules(endpointID uint16) restore.DNSRules {
 
 	restored := make(restore.DNSRules)
 	for port, entries := range p.allowed[uint64(endpointID)] {
-		count := 0
 		var ipRules restore.IPRules
 		for cs, regex := range entries {
 			var IPs map[string]struct{}
 			if !cs.IsWildcard() {
 				IPs = make(map[string]struct{})
+				count := 0
 			Loop:
 				for _, nid := range cs.GetSelections() {
-					for _, ip := range p.LookupIPsBySecID(nid) {
+					nidIPs := p.LookupIPsBySecID(nid)
+					for _, ip := range nidIPs {
+						// Skip IPs that are allowed but have never been used,
+						// but only if at least one server has been used so far.
+						if len(p.usedServers) > 0 {
+							if _, used := p.usedServers[ip]; !used {
+								continue
+							}
+						}
 						IPs[ip] = struct{}{}
 						count++
-						if count > 1000 {
+						if count > p.maxIPsPerRestoredDNSRule {
 							log.WithFields(logrus.Fields{
 								logfields.EndpointID:            endpointID,
 								logfields.Port:                  port,
 								logfields.EndpointLabelSelector: cs,
-							}).Warning("Too many DNS rules or destinations for a port, skipping the rest")
+								logfields.Limit:                 p.maxIPsPerRestoredDNSRule,
+								logfields.Count:                 len(nidIPs),
+							}).Warning("Too many IPs for a DNS rule, skipping the rest")
 							break Loop
 						}
 					}
 				}
 			}
 			ipRules = append(ipRules, restore.IPRule{IPs: IPs, Re: restore.RuleRegex{Regexp: regex}})
-			if count > 1000 {
-				break
-			}
 		}
 		restored[port] = ipRules
 	}
@@ -355,7 +370,7 @@ func (proxyStat *ProxyRequestContext) IsTimeout() bool {
 // notifyFunc will be called with DNS response data that is returned to a
 // requesting endpoint. Note that denied requests will not trigger this
 // callback.
-func StartDNSProxy(address string, port uint16, enableDNSCompression bool, lookupEPFunc LookupEndpointIDByIPFunc, lookupSecIDFunc LookupSecIDByIPFunc, lookupIPsFunc LookupIPsBySecIDFunc, notifyFunc NotifyOnDNSMsgFunc) (*DNSProxy, error) {
+func StartDNSProxy(address string, port uint16, enableDNSCompression bool, maxRestoreDNSIPs int, lookupEPFunc LookupEndpointIDByIPFunc, lookupSecIDFunc LookupSecIDByIPFunc, lookupIPsFunc LookupIPsBySecIDFunc, notifyFunc NotifyOnDNSMsgFunc) (*DNSProxy, error) {
 	if port == 0 {
 		log.Debug("DNS Proxy port is configured to 0. A random port will be assigned by the OS.")
 	}
@@ -370,10 +385,12 @@ func StartDNSProxy(address string, port uint16, enableDNSCompression bool, looku
 		LookupIPsBySecID:         lookupIPsFunc,
 		NotifyOnDNSMsg:           notifyFunc,
 		lookupTargetDNSServer:    lookupTargetDNSServer,
+		usedServers:              make(map[string]struct{}),
 		allowed:                  make(perEPAllow),
 		restored:                 make(perEPRestored),
 		restoredEPs:              make(restoredEPs),
 		EnableDNSCompression:     enableDNSCompression,
+		maxIPsPerRestoredDNSRule: maxRestoreDNSIPs,
 	}
 	atomic.StoreInt32(&p.rejectReply, dns.RcodeRefused)
 
@@ -619,6 +636,12 @@ func (p *DNSProxy) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		scopedLog.WithError(err).Error("Cannot forward proxied DNS response")
 		stat.Err = fmt.Errorf("Cannot forward proxied DNS response: %s", err)
 		p.NotifyOnDNSMsg(time.Now(), ep, epIPPort, targetServerAddr, response, protocol, true, &stat)
+	} else {
+		p.Lock()
+		// Add the server to the set of used DNS servers. This set is never GCd, but is limited by set
+		// of DNS server IPs that are allowed by a policy and for which successful response was received.
+		p.usedServers[targetServerIP.String()] = struct{}{}
+		p.Unlock()
 	}
 }
 

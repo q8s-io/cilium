@@ -26,7 +26,7 @@ import (
 	cilium_v2_client "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2/client"
 	k8sconfig "github.com/cilium/cilium/pkg/k8s/config"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/constants"
-	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
@@ -35,7 +35,6 @@ import (
 	"github.com/cilium/cilium/pkg/source"
 
 	"github.com/sirupsen/logrus"
-	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -152,6 +151,10 @@ func Init(conf k8sconfig.Configuration) error {
 		return fmt.Errorf("unable to create cilium k8s client: %s", err)
 	}
 
+	if err := createAPIExtensionsClient(); err != nil {
+		return fmt.Errorf("unable to create k8s apiextensions client: %s", err)
+	}
+
 	heartBeat := func(ctx context.Context) error {
 		// Kubernetes does a get node of the node that kubelet is running [0]. This seems excessive in
 		// our case because the amount of data transferred is bigger than doing a Get of /healthz.
@@ -263,18 +266,7 @@ func RegisterCRDs() error {
 		return nil
 	}
 
-	restConfig, err := CreateConfig()
-	if err != nil {
-		return fmt.Errorf("Unable to create rest configuration: %s", err)
-	}
-
-	apiextensionsclientset, err := apiextensionsclient.NewForConfig(restConfig)
-	if err != nil {
-		return fmt.Errorf("Unable to create rest configuration for k8s CRD: %s", err)
-	}
-
-	err = cilium_v2_client.CreateCustomResourceDefinitions(apiextensionsclientset)
-	if err != nil {
+	if err := cilium_v2_client.CreateCustomResourceDefinitions(APIExtClient()); err != nil {
 		return fmt.Errorf("Unable to create custom resource definition: %s", err)
 	}
 

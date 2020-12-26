@@ -21,21 +21,21 @@ IP6_HOST=$4
 MODE=$5
 # Only set if MODE = "direct", "ipvlan", "flannel"
 NATIVE_DEVS=$6
-XDP_DEV=$7
-XDP_MODE=$8
-MTU=$9
-IPSEC=${10}
-ENCRYPT_DEV=${11}
-HOSTLB=${12}
-HOSTLB_UDP=${13}
-HOSTLB_PEER=${14}
-CGROUP_ROOT=${15}
-BPFFS_ROOT=${16}
-NODE_PORT=${17}
-NODE_PORT_BIND=${18}
-MCPU=${19}
-NODE_PORT_IPV4_ADDRS=${20}
-NODE_PORT_IPV6_ADDRS=${21}
+HOST_DEV1=$7
+HOST_DEV2=$8
+XDP_DEV=$9
+XDP_MODE=${10}
+MTU=${11}
+IPSEC=${12}
+ENCRYPT_DEV=${13}
+HOSTLB=${14}
+HOSTLB_UDP=${15}
+HOSTLB_PEER=${16}
+CGROUP_ROOT=${17}
+BPFFS_ROOT=${18}
+NODE_PORT=${19}
+NODE_PORT_BIND=${20}
+MCPU=${21}
 NR_CPUS=${22}
 ENDPOINT_ROUTES=${23}
 
@@ -78,37 +78,6 @@ function setup_dev()
 		echo 1 > /proc/sys/net/ipv4/conf/${NAME}/accept_local
 		echo 0 > /proc/sys/net/ipv4/conf/${NAME}/send_redirects
 	fi
-}
-
-function setup_veth_pair()
-{
-	local -r NAME1=$1
-	local -r NAME2=$2
-
-	# Only recreate the veth pair if it does not exist already.
-	# This avoids problems with changing MAC addresses.
- 	if [ "$(ip link show $NAME1 type veth | cut -d ' ' -f 2)" != "${NAME1}@${NAME2}:" ] ; then
-		ip link del $NAME1 2> /dev/null || true
-		ip link add name $NAME1 address $(rnd_mac_addr) type veth \
-            peer name $NAME2 address $(rnd_mac_addr)
-	fi
-
-	setup_dev $NAME1
-	setup_dev $NAME2
-}
-
-function setup_ipvlan_slave()
-{
-	local -r NATIVE_DEV=$1
-	local -r HOST_DEV=$2
-
-	# No issues with changing MAC addresses since all ipvlan
-	# slaves always inherits MAC from native device.
-	ip link del $HOST_DEV 2> /dev/null || true
-
-	ip link add link $NATIVE_DEV name $HOST_DEV type ipvlan mode l3
-
-	setup_dev $HOST_DEV
 }
 
 function move_local_rules_af()
@@ -262,7 +231,7 @@ function bpf_compile()
 	EXTRA_OPTS=$4
 
 	clang -O2 -target bpf -std=gnu89 -nostdinc -emit-llvm	\
-	      -Wall -Wextra -Werror -Wshadow			\
+	      -g -Wall -Wextra -Werror -Wshadow			\
 	      -Wno-address-of-packed-member			\
 	      -Wno-unknown-warning-option			\
 	      -Wno-gnu-variable-sized-type-not-at-end		\
@@ -396,36 +365,6 @@ function encap_fail()
 	exit 1
 }
 
-# Base device setup
-case "${MODE}" in
-	"flannel")
-		HOST_DEV1="${NATIVE_DEVS}"
-		HOST_DEV2="${NATIVE_DEVS}"
-
-		setup_dev "${NATIVE_DEVS}"
-		;;
-	"ipvlan")
-		HOST_DEV1="cilium_host"
-		HOST_DEV2="${HOST_DEV1}"
-
-		setup_ipvlan_slave $NATIVE_DEVS $HOST_DEV1
-
-		ip link set $HOST_DEV1 mtu $MTU
-		;;
-	*)
-		HOST_DEV1="cilium_host"
-		HOST_DEV2="cilium_net"
-
-		setup_veth_pair $HOST_DEV1 $HOST_DEV2
-
-		ip link set $HOST_DEV1 arp off
-		ip link set $HOST_DEV2 arp off
-
-		ip link set $HOST_DEV1 mtu $MTU
-		ip link set $HOST_DEV2 mtu $MTU
-        ;;
-esac
-
 # node_config.h header generation
 case "${MODE}" in
 	*)
@@ -537,22 +476,6 @@ if [ "$MODE" = "direct" ] || [ "$MODE" = "ipvlan" ] || [ "$NODE_PORT" = "true" ]
 		if [ "$IP6_HOST" != "<nil>" ]; then
 			echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
 		fi
-
-		if [ "$NODE_PORT_IPV4_ADDRS" != "<nil>" ]; then
-			declare -A v4_addrs
-			for a in ${NODE_PORT_IPV4_ADDRS//;/ }; do
-				IFS== read iface addr <<< "$a"
-				v4_addrs[$iface]=$addr
-			done
-		fi
-		if [ "$NODE_PORT_IPV6_ADDRS" != "<nil>" ]; then
-			declare -A v6_addrs
-			for a in ${NODE_PORT_IPV6_ADDRS//;/ }; do
-				IFS== read iface addr <<< "$a"
-				v6_addrs[$iface]=$addr
-			done
-		fi
-
 		echo "$NATIVE_DEVS" > $RUNDIR/device.state
 	fi
 else
@@ -677,17 +600,10 @@ if [ "$XDP_DEV" != "<nil>" ]; then
 	if [ "$NODE_PORT" = "true" ]; then
 		NATIVE_DEV_IDX=$(cat /sys/class/net/${XDP_DEV}/ifindex)
 		COPTS="${COPTS} -DNATIVE_DEV_IFINDEX=${NATIVE_DEV_IDX}"
-		# Currently it assumes that XDP_DEV is listed among NATIVE_DEVS
-		if [ "$IP4_HOST" != "<nil>" ]; then
-			COPTS="${COPTS} -DIPV4_NODEPORT=${v4_addrs[$XDP_DEV]}"
-		fi
-		if [ "$IP6_HOST" != "<nil>" ]; then
-			COPTS="${COPTS} -DIPV6_NODEPORT_VAL={.addr={${v6_addrs[$XDP_DEV]}}}"
-		fi
 	fi
 	xdp_load $XDP_DEV $XDP_MODE "$COPTS" bpf_xdp.c bpf_xdp.o from-netdev $CIDR_MAP
 fi
 
 # Compile dummy BPF file containing all shared struct definitions used by
 # pkg/alignchecker to validate C and Go equivalent struct alignments
-bpf_compile bpf_alignchecker.c bpf_alignchecker.o obj "-g"
+bpf_compile bpf_alignchecker.c bpf_alignchecker.o obj ""

@@ -21,11 +21,11 @@ import (
 
 	"github.com/cilium/cilium/pkg/debug"
 	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/lock"
-	uuidfactor "github.com/cilium/cilium/pkg/uuid"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -90,10 +90,12 @@ func (pl *pathLocks) runGC() {
 }
 
 func (pl *pathLocks) lock(ctx context.Context, path string) (id uuid.UUID, err error) {
+	lockTimer, lockTimerDone := inctimer.New()
+	defer lockTimerDone()
 	for {
 		pl.mutex.Lock()
 		if _, ok := pl.lockPaths[path]; !ok {
-			id = uuidfactor.NewUUID()
+			id = uuid.New()
 			pl.lockPaths[path] = lockOwner{
 				created: time.Now(),
 				id:      id,
@@ -104,7 +106,7 @@ func (pl *pathLocks) lock(ctx context.Context, path string) (id uuid.UUID, err e
 		pl.mutex.Unlock()
 
 		select {
-		case <-time.After(time.Duration(10) * time.Millisecond):
+		case <-lockTimer.After(time.Duration(10) * time.Millisecond):
 		case <-ctx.Done():
 			err = fmt.Errorf("lock was cancelled: %s", ctx.Err())
 			return
@@ -114,7 +116,7 @@ func (pl *pathLocks) lock(ctx context.Context, path string) (id uuid.UUID, err e
 
 func (pl *pathLocks) unlock(path string, id uuid.UUID) {
 	pl.mutex.Lock()
-	if owner, ok := pl.lockPaths[path]; ok && uuid.Equal(owner.id, id) {
+	if owner, ok := pl.lockPaths[path]; ok && owner.id == id {
 		delete(pl.lockPaths, path)
 	}
 	pl.mutex.Unlock()

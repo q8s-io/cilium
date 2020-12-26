@@ -4,10 +4,6 @@
 
 Run cilium-operator-azure
 
-### Synopsis
-
-Run cilium-operator-azure
-
 ```
 cilium-operator-azure [flags]
 ```
@@ -18,6 +14,7 @@ cilium-operator-azure [flags]
       --azure-cloud-name string                   Name of the Azure cloud being used (default "AzurePublicCloud")
       --azure-resource-group string               Resource group to use for Azure IPAM
       --azure-subscription-id string              Subscription ID to access Azure API
+      --azure-use-primary-address                 Use Azure IP address from interface's primary IPConfigurations (default true)
       --azure-user-assigned-identity-id string    ID of the user assigned identity used to auth with the Azure API
       --cilium-endpoint-gc-interval duration      GC interval for cilium endpoints (default 5m0s)
       --cluster-id int                            Unique identifier of the cluster
@@ -37,11 +34,12 @@ cilium-operator-azure [flags]
       --enable-k8s-endpoint-slice                 Enables k8s EndpointSlice feature into Cilium-Operator if the k8s cluster supports it (default true)
       --enable-k8s-event-handover                 Enable k8s event handover to kvstore for improved scalability
       --enable-metrics                            Enable Prometheus metrics
+      --gops-port int                             Port for gops server to listen on (default 9891)
   -h, --help                                      help for cilium-operator-azure
       --identity-allocation-mode string           Method to use for identity allocation (default "kvstore")
       --identity-gc-interval duration             GC interval for security identities (default 15m0s)
       --identity-gc-rate-interval duration        Interval used for rate limiting the GC of security identities (default 1m0s)
-      --identity-gc-rate-limit int                Maximum number of security identities that will be deleted within the identity-gc-rate-interval (default 250)
+      --identity-gc-rate-limit int                Maximum number of security identities that will be deleted within the identity-gc-rate-interval (default 2500)
       --identity-heartbeat-timeout duration       Timeout after which identity expires on lack of heartbeat (default 30m0s)
       --ipam string                               Backend to use for IPAM (default "azure")
       --k8s-api-server string                     Kubernetes API server URL

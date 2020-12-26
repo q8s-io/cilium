@@ -30,7 +30,7 @@ import (
 // instructions specified in the Istio Getting Started Guide in
 // Documentation/gettingstarted/istio.rst.
 var _ = SkipContextIf(func() bool {
-	return helpers.SkipQuarantined() && helpers.GetCurrentK8SEnv() == "1.19"
+	return helpers.SkipQuarantined() && (helpers.GetCurrentK8SEnv() == "1.19" || helpers.GetCurrentK8SEnv() == "1.20")
 }, "K8sIstioTest", func() {
 
 	var (
@@ -81,7 +81,7 @@ var _ = SkipContextIf(func() bool {
 	BeforeAll(func() {
 		k8sVersion := helpers.GetCurrentK8SEnv()
 		switch k8sVersion {
-		case "1.7", "1.8", "1.9", "1.10", "1.11", "1.12", "1.13":
+		case "1.13":
 			Skip(fmt.Sprintf("Istio %s doesn't support K8S %s", istioVersion, k8sVersion))
 		}
 
@@ -119,7 +119,7 @@ var _ = SkipContextIf(func() bool {
 		_ = kubectl.Exec(fmt.Sprintf("./cilium-istioctl manifest generate | %s delete -f -", helpers.KubectlCmd))
 
 		By("Waiting all terminating PODs to disappear")
-		err := kubectl.WaitCleanAllTerminatingPods(teardownTimeout)
+		err := kubectl.WaitTerminatingPods(teardownTimeout)
 		ExpectWithOffset(1, err).To(BeNil(), "terminating Istio PODs are not deleted after timeout")
 
 		By("Deleting the istio-system namespace")

@@ -84,7 +84,8 @@ Relay and Hubble's graphical UI.
 
        .. parsed-literal::
 
-            kubectl apply -f |SCM_WEB|/install/kubernetes/experimental-install.yaml
+            kubectl apply -f |SCM_WEB|/install/kubernetes/quick-install.yaml
+            kubectl apply -f |SCM_WEB|/install/kubernetes/quick-hubble-install.yaml
 
     .. group-tab:: Multi-node cluster with ``kind``
 
@@ -108,11 +109,6 @@ Relay and Hubble's graphical UI.
                   --set hubble.listenAddress=":4244" \\
                   --set hubble.relay.enabled=true \\
                   --set hubble.ui.enabled=true
-
-.. note::
-
-    Please note that Hubble Relay and Hubble UI are currently in beta status
-    and are not yet recommended for production use.
 
 Validate the Installation
 =========================
@@ -195,8 +191,8 @@ guide. However you can apply the same techniques to observe application
 connectivity dependencies in your own namespace, and clusters for
 application of any type.
 
-Once the the deployment is ready, issue a request from both spaceships to
-emulate some traffic.
+Once the deployment is ready, issue a request from both spaceships to emulate
+some traffic.
 
 .. parsed-literal::
 
@@ -259,7 +255,7 @@ In order to avoid passing ``--server localhost:4245`` to every command, you may
 export the following environment variable:
 
 .. parsed-literal::
-   $ export HUBBLE_DEFAULT_SOCKET_PATH=localhost:4245
+   $ export HUBBLE_SERVER=localhost:4245
 
 Let's now issue some requests to emulate some traffic again. This first request
 is allowed by the policy.

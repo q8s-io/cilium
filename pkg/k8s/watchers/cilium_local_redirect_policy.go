@@ -64,15 +64,16 @@ func (k *K8sWatcher) ciliumLocalRedirectPolicyInit(ciliumLRPClient *k8s.K8sCiliu
 		},
 		k8s.ConvertToCiliumLocalRedirectPolicy,
 	)
+
 	k.blockWaitGroupToSyncResources(
 		wait.NeverStop,
 		nil,
-		lrpController,
+		lrpController.HasSynced,
 		k8sAPIGroupCiliumLocalRedirectPolicyV2,
 	)
 
 	go lrpController.Run(wait.NeverStop)
-	k.k8sAPIGroups.addAPI(k8sAPIGroupCiliumLocalRedirectPolicyV2)
+	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumLocalRedirectPolicyV2)
 }
 
 func (k *K8sWatcher) addCiliumLocalRedirectPolicy(clrp *cilium_v2.CiliumLocalRedirectPolicy) error {
@@ -87,7 +88,7 @@ func (k *K8sWatcher) addCiliumLocalRedirectPolicy(clrp *cilium_v2.CiliumLocalRed
 
 	rp, policyAddErr := redirectpolicy.Parse(clrp, true)
 	if policyAddErr == nil {
-		_, policyAddErr = k.redirectPolicyManager.AddRedirectPolicy(*rp, k.podStore)
+		_, policyAddErr = k.redirectPolicyManager.AddRedirectPolicy(*rp)
 	}
 
 	if policyAddErr != nil {

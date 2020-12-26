@@ -2,6 +2,10 @@
 
 set -e
 
+if ! [[ -z $DOCKER_LOGIN && -z $DOCKER_PASSWORD ]]; then
+    echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_LOGIN}" --password-stdin
+fi
+
 HOST=$(hostname)
 export HELM_VERSION="3.3.4"
 export TOKEN="258062.5d84c017c9b2796c"
@@ -79,7 +83,7 @@ fi
 sudo ln -sf $KUBEDNS_DEPLOYMENT $DNS_DEPLOYMENT
 $PROVISIONSRC/dns.sh
 
-cat <<EOF > /etc/hosts
+cat <<EOF >> /etc/hosts
 127.0.0.1       localhost
 ::1     localhost ip6-localhost ip6-loopback
 ff02::1 ip6-allnodes
@@ -202,6 +206,7 @@ networking:
 controlPlaneEndpoint: "k8s1:6443"
 controllerManager:
   extraArgs:
+    "node-cidr-mask-size-ipv6": "120"
     "feature-gates": "{{ .CONTROLLER_FEATURE_GATES }},IPv6DualStack={{ .IPV6_DUAL_STACK_FEATURE_GATE }}"
 apiServer:
   extraArgs:
@@ -223,39 +228,6 @@ fi
 # SystemVerification errors are ignored as net-next VM often triggers them, eg:
 #     [ERROR SystemVerification]: unsupported kernel release: 5.0.0-rc6+
 case $K8S_VERSION in
-    "1.8")
-        KUBERNETES_CNI_VERSION="0.5.1"
-        K8S_FULL_VERSION="1.8.14"
-        KUBEADM_OPTIONS="--skip-preflight-checks"
-        KUBEADM_SLAVE_OPTIONS="--skip-preflight-checks"
-        ;;
-    "1.9")
-        KUBERNETES_CNI_VERSION="0.6.0"
-        K8S_FULL_VERSION="1.9.11"
-        KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
-        KUBEADM_OPTIONS="--ignore-preflight-errors=cri,SystemVerification"
-        ;;
-    "1.10")
-        KUBERNETES_CNI_VERSION="0.6.0"
-        K8S_FULL_VERSION="1.10.13"
-        KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
-        KUBEADM_OPTIONS="--ignore-preflight-errors=cri,SystemVerification"
-        ;;
-    "1.11")
-        KUBERNETES_CNI_VERSION="0.7.5"
-        K8S_FULL_VERSION="1.11.10"
-        KUBEADM_OPTIONS="--ignore-preflight-errors=cri,FileExisting-crictl,SystemVerification"
-        KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,FileExisting-crictl,SystemVerification"
-        sudo ln -sf $COREDNS_DEPLOYMENT $DNS_DEPLOYMENT
-        ;;
-    "1.12")
-        KUBERNETES_CNI_VERSION="0.7.5"
-        K8S_FULL_VERSION="1.12.10"
-        KUBEADM_OPTIONS="--ignore-preflight-errors=cri,SystemVerification"
-        KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
-        sudo ln -sf $COREDNS_DEPLOYMENT $DNS_DEPLOYMENT
-        KUBEADM_CONFIG="${KUBEADM_CONFIG_ALPHA2}"
-        ;;
     "1.13")
         KUBERNETES_CNI_VERSION="0.7.5"
         K8S_FULL_VERSION="1.13.12"
@@ -290,7 +262,7 @@ case $K8S_VERSION in
         ;;
     "1.17")
         KUBERNETES_CNI_VERSION="0.8.7"
-        K8S_FULL_VERSION="1.17.12"
+        K8S_FULL_VERSION="1.17.16"
         KUBEADM_OPTIONS="--ignore-preflight-errors=cri"
         KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
         sudo ln -sf $COREDNS_DEPLOYMENT $DNS_DEPLOYMENT
@@ -304,7 +276,7 @@ case $K8S_VERSION in
         sudo apt-get install -y conntrack
         KUBERNETES_CNI_VERSION="0.8.7"
         KUBERNETES_CNI_OS="-linux"
-        K8S_FULL_VERSION="1.18.9"
+        K8S_FULL_VERSION="1.18.14"
         KUBEADM_OPTIONS="--ignore-preflight-errors=cri"
         KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
         sudo ln -sf $COREDNS_DEPLOYMENT $DNS_DEPLOYMENT
@@ -318,7 +290,21 @@ case $K8S_VERSION in
         sudo apt-get install -y conntrack
         KUBERNETES_CNI_VERSION="0.8.7"
         KUBERNETES_CNI_OS="-linux"
-        K8S_FULL_VERSION="1.19.2"
+        K8S_FULL_VERSION="1.19.6"
+        KUBEADM_OPTIONS="--ignore-preflight-errors=cri"
+        KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
+        sudo ln -sf $COREDNS_DEPLOYMENT $DNS_DEPLOYMENT
+        KUBEADM_CONFIG="${KUBEADM_CONFIG_V1BETA2}"
+        CONTROLLER_FEATURE_GATES="EndpointSlice=true"
+        API_SERVER_FEATURE_GATES="EndpointSlice=true"
+        ;;
+    "1.20")
+        # kubeadm 1.20 requires conntrack to be installed, we can remove this
+        # once we have upgrade the VM image version.
+        sudo apt-get install -y conntrack
+        KUBERNETES_CNI_VERSION="0.8.7"
+        KUBERNETES_CNI_OS="-linux"
+        K8S_FULL_VERSION="1.20.1"
         KUBEADM_OPTIONS="--ignore-preflight-errors=cri"
         KUBEADM_SLAVE_OPTIONS="--discovery-token-unsafe-skip-ca-verification --ignore-preflight-errors=cri,SystemVerification"
         sudo ln -sf $COREDNS_DEPLOYMENT $DNS_DEPLOYMENT
@@ -337,7 +323,7 @@ esac
 #Install kubernetes
 set +e
 case $K8S_VERSION in
-    "1.8"|"1.9"|"1.10"|"1.11"|"1.12"|"1.13"|"1.14"|"1.15"|"1.16"|"1.17"|"1.18"|"1.19")
+    "1.13"|"1.14"|"1.15"|"1.16"|"1.17"|"1.18"|"1.19"|"1.20")
         install_k8s_using_packages \
             kubernetes-cni=${KUBERNETES_CNI_VERSION}* \
             kubelet=${K8S_FULL_VERSION}* \
@@ -349,7 +335,7 @@ case $K8S_VERSION in
             install_k8s_using_binary "v${K8S_FULL_VERSION}" "v${KUBERNETES_CNI_VERSION}" "${KUBERNETES_CNI_OS}"
         fi
         ;;
-#   "1.19")
+#   "1.20")
 #       install_k8s_using_binary "v${K8S_FULL_VERSION}" "v${KUBERNETES_CNI_VERSION}" "${KUBERNETES_CNI_OS}"
 #       ;;
 esac
@@ -411,7 +397,8 @@ if [[ "${HOST}" == "k8s1" ]]; then
       sudo chown vagrant:vagrant /home/vagrant/.kube/config
 
       sudo cp -f /etc/kubernetes/admin.conf ${CILIUM_CONFIG_DIR}/kubeconfig
-      kubectl taint nodes --all node-role.kubernetes.io/master-
+      kubectl taint nodes --all node-role.kubernetes.io/master- || true
+      kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
     else
       echo "SKIPPING K8S INSTALLATION"
     fi
@@ -454,7 +441,7 @@ EOF
 
 # Create world network
 docker network create --subnet=192.168.9.0/24 outside
-docker run --net outside --ip 192.168.9.10 --restart=always -d docker.io/cilium/demo-httpd:latest
-docker run --net outside --ip 192.168.9.11 --restart=always -d docker.io/cilium/demo-httpd:latest
+docker run --net outside --ip 192.168.9.10 --restart=always -d docker.io/cilium/demo-httpd:1.0
+docker run --net outside --ip 192.168.9.11 --restart=always -d docker.io/cilium/demo-httpd:1.0
 
 sudo touch /etc/provision_finished

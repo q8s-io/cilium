@@ -15,15 +15,17 @@
 package certloader
 
 import (
-	"fmt"
-	"path/filepath"
 	"sync"
+	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/sirupsen/logrus"
 
+	"github.com/cilium/cilium/pkg/crypto/certloader/fswatcher"
+	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
+
+const watcherEventCoalesceWindow = 100 * time.Millisecond
 
 // Watcher is a set of TLS configuration files including CA files, and a
 // certificate along with its private key. The files are watched for change and
@@ -31,7 +33,7 @@ import (
 type Watcher struct {
 	*FileReloader
 	log       logrus.FieldLogger
-	fswatcher *fsnotify.Watcher
+	fswatcher *fswatcher.Watcher
 	stop      chan struct{}
 }
 
@@ -118,6 +120,11 @@ func (w *Watcher) Watch() <-chan struct{} {
 	// prepare the ready channel to be returned. We will close it exactly once.
 	var once sync.Once
 	ready := make(chan struct{})
+	markReady := func() {
+		once.Do(func() {
+			close(ready)
+		})
+	}
 
 	// build maps for the CA files and keypair files to help detecting what has
 	// changed in order to reload only the appropriate certificates.
@@ -133,6 +140,9 @@ func (w *Watcher) Watch() <-chan struct{} {
 		caMap[path] = struct{}{}
 	}
 
+	// used to coalesce fswatcher events that arrive within the same time window
+	var keypairReload, caReload <-chan time.Time
+
 	go func() {
 		defer w.fswatcher.Close()
 		for {
@@ -143,45 +153,52 @@ func (w *Watcher) Watch() <-chan struct{} {
 					logfields.Path: path,
 					"operation":    event.Op,
 				})
-				log.Debug("Received fsnotify event")
+				log.Debug("Received fswatcher event")
+
 				_, keypairUpdated := keypairMap[path]
 				_, caUpdated := caMap[path]
-				createOperation := event.Op&fsnotify.Create == fsnotify.Create
-				if (keypairUpdated || caUpdated) && createOperation {
-					// A file we are interested in has been created. We might
-					// have been watching only over its directory until now,
-					// add it to the watcher since it exists.
-					if err := w.fswatcher.Add(path); err != nil {
-						log.WithError(err).Warnf("Failed to add %s to fsnotify watcher", logfields.Path)
-					}
-				}
+
 				if keypairUpdated {
-					keypair, err := w.ReloadKeypair()
-					if err != nil {
-						log.WithError(err).Warn("Keypair update failed")
-						continue
+					if keypairReload == nil {
+						keypairReload = inctimer.After(watcherEventCoalesceWindow)
 					}
-					id := keypairId(keypair)
-					log.WithField("keypair-sn", id).Info("Keypair updated")
 				} else if caUpdated {
-					if _, err := w.ReloadCA(); err != nil {
-						log.WithError(err).Warn("Certificate authority update failed")
-						continue
+					if caReload == nil {
+						caReload = inctimer.After(watcherEventCoalesceWindow)
 					}
-					log.Info("Certificate authority updated")
 				} else {
-					log.Debug("Unknown file, ignoring.")
+					// fswatcher should never send events for unknown files
+					log.Warn("Unknown file, ignoring.")
 					continue
 				}
+			case <-keypairReload:
+				keypairReload = nil
+
+				keypair, err := w.ReloadKeypair()
+				if err != nil {
+					w.log.WithError(err).Warn("Keypair update failed")
+					continue
+				}
+				id := keypairId(keypair)
+				w.log.WithField("keypair-sn", id).Info("Keypair updated")
 				if w.Ready() {
-					once.Do(func() {
-						close(ready)
-					})
+					markReady()
+				}
+			case <-caReload:
+				caReload = nil
+
+				if _, err := w.ReloadCA(); err != nil {
+					w.log.WithError(err).Warn("Certificate authority update failed")
+					continue
+				}
+				w.log.Info("Certificate authority updated")
+				if w.Ready() {
+					markReady()
 				}
 			case err := <-w.fswatcher.Errors:
-				w.log.WithError(err).Warn("fsnotify watcher error")
+				w.log.WithError(err).Warn("fswatcher error")
 			case <-w.stop:
-				w.log.Info("Stopping fsnotify watcher")
+				w.log.Info("Stopping fswatcher")
 				return
 			}
 		}
@@ -195,46 +212,23 @@ func (w *Watcher) Stop() {
 	close(w.stop)
 }
 
-// newFsWatcher returns a fsnotify.Watcher watching over the given files.
-// When a file doesn't exists, we watch over its directory instead to pick up
-// the file creation event.
-func newFsWatcher(caFiles []string, certFile, privkeyFile string) (*fsnotify.Watcher, error) {
-	fswatcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
+// newFsWatcher returns a fswatcher.Watcher watching over the given files.
+// The fswatcher.Watcher supports watching over files which do not exist yet.
+// A create event will be emitted once the file is added.
+func newFsWatcher(caFiles []string, certFile, privkeyFile string) (*fswatcher.Watcher, error) {
+	trackFiles := []string{}
 
-	add := func(path string) error {
-		if path == "" {
-			return nil
-		}
-		if err := fswatcher.Add(path); err != nil {
-			// the file might not exists yet, try watching its directory
-			// instead.
-			dir := filepath.Dir(path)
-			if err := fswatcher.Add(dir); err != nil {
-				// complain about the directory, as this will be more useful than
-				// the file itself.
-				return fmt.Errorf("failed to add %q to fsnotify watcher: %w", dir, err)
-			}
-		}
-		return nil
+	if certFile != "" {
+		trackFiles = append(trackFiles, certFile)
 	}
-
-	if err := add(certFile); err != nil {
-		fswatcher.Close()
-		return nil, err
-	}
-	if err := add(privkeyFile); err != nil {
-		fswatcher.Close()
-		return nil, err
+	if privkeyFile != "" {
+		trackFiles = append(trackFiles, privkeyFile)
 	}
 	for _, path := range caFiles {
-		if err := add(path); err != nil {
-			fswatcher.Close()
-			return nil, err
+		if path != "" {
+			trackFiles = append(trackFiles, path)
 		}
 	}
 
-	return fswatcher, nil
+	return fswatcher.New(trackFiles)
 }

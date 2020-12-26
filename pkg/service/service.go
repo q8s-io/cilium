@@ -17,6 +17,8 @@ package service
 import (
 	"fmt"
 	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/cidr"
@@ -44,7 +46,7 @@ var (
 type LBMap interface {
 	UpsertService(*lbmap.UpsertServiceParams) error
 	DeleteService(lb.L3n4AddrID, int, bool) error
-	AddBackend(uint16, net.IP, lb.L4Type, uint16, bool) error
+	AddBackend(uint16, net.IP, uint16, bool) error
 	DeleteBackendByID(uint16, bool) error
 	AddAffinityMatch(uint16, uint16) error
 	DeleteAffinityMatch(uint16, uint16) error
@@ -134,7 +136,8 @@ type Service struct {
 	healthServer  healthServer
 	monitorNotify monitorNotify
 
-	lbmap LBMap
+	lbmap         LBMap
+	lastUpdatedTs atomic.Value
 }
 
 // NewService creates a new instance of the service handler.
@@ -148,7 +151,7 @@ func NewService(monitorNotify monitorNotify) *Service {
 	maglev := option.Config.NodePortAlg == option.NodePortAlgMaglev
 	maglevTableSize := option.Config.MaglevTableSize
 
-	return &Service{
+	svc := &Service{
 		svcByHash:       map[string]*svcInfo{},
 		svcByID:         map[lb.ID]*svcInfo{},
 		backendRefCount: counter.StringCounter{},
@@ -157,6 +160,22 @@ func NewService(monitorNotify monitorNotify) *Service {
 		healthServer:    localHealthServer,
 		lbmap:           lbmap.New(maglev, maglevTableSize),
 	}
+	svc.lastUpdatedTs.Store(time.Now())
+	return svc
+}
+
+func (s *Service) GetLastUpdatedTs() time.Time {
+	if val := s.lastUpdatedTs.Load(); val != nil {
+		ts, ok := val.(time.Time)
+		if ok {
+			return ts
+		}
+	}
+	return time.Now()
+}
+
+func (s *Service) GetCurrentTs() time.Time {
+	return time.Now()
 }
 
 // InitMaps opens or creates BPF maps used by services.
@@ -243,6 +262,20 @@ func (s *Service) UpsertService(params *lb.SVC) (bool, lb.ID, error) {
 			option.EnableSVCSourceRangeCheck)
 	}
 
+	// In case we do DSR + IPIP, then it's required that the backends use
+	// the same destination port as the frontend service.
+	if option.Config.NodePortMode == option.NodePortModeDSR &&
+		option.Config.LoadBalancerDSRDispatch == option.DSRDispatchIPIP &&
+		params.Type != lb.SVCTypeClusterIP {
+		for _, b := range params.Backends {
+			if b.Port != params.Frontend.L3n4Addr.Port {
+				err := fmt.Errorf("Unable to upsert service due to frontend/backend port mismatch under DSR with IPIP: %d vs %d",
+					params.Frontend.L3n4Addr.Port, b.Port)
+				return false, lb.ID(0), err
+			}
+		}
+	}
+
 	// If needed, create svcInfo and allocate service ID
 	svc, new, prevSessionAffinity, prevLoadBalancerSourceRanges, err :=
 		s.createSVCInfoIfNotExist(params)
@@ -310,7 +343,6 @@ func (s *Service) UpsertService(params *lb.SVC) (bool, lb.ID, error) {
 
 	s.notifyMonitorServiceUpsert(svc.frontend, svc.backends,
 		svc.svcType, svc.svcTrafficPolicy, svc.svcName, svc.svcNamespace)
-
 	return new, lb.ID(svc.frontend.ID), nil
 }
 
@@ -684,7 +716,6 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 		}).Debug("Adding new backend")
 
 		if err := s.lbmap.AddBackend(uint16(b.ID), b.L3n4Addr.IP,
-			b.L3n4Addr.L4Addr.Protocol,
 			b.L3n4Addr.L4Addr.Port, ipv6); err != nil {
 			return err
 		}
@@ -700,7 +731,6 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 		ID:                        uint16(svc.frontend.ID),
 		IP:                        svc.frontend.L3n4Addr.IP,
 		Port:                      svc.frontend.L3n4Addr.L4Addr.Port,
-		Protocol:                  string(svc.frontend.L3n4Addr.L4Addr.Protocol),
 		Backends:                  backends,
 		PrevBackendCount:          prevBackendCount,
 		IPv6:                      ipv6,

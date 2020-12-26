@@ -25,6 +25,7 @@ import (
 
 	operatorMetrics "github.com/cilium/cilium/operator/metrics"
 	operatorOption "github.com/cilium/cilium/operator/option"
+	operatorWatchers "github.com/cilium/cilium/operator/watchers"
 	"github.com/cilium/cilium/pkg/components"
 	"github.com/cilium/cilium/pkg/ipam/allocator"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
@@ -69,11 +70,16 @@ var (
 				os.Exit(0)
 			}
 
-			// Open socket for using gops to get stacktraces of the operator.
-			if err := gops.Listen(gops.Options{}); err != nil {
-				fmt.Fprintf(os.Stderr, "unable to start gops: %s", err)
-				os.Exit(-1)
+			// Open socket for using gops to get stacktraces of the agent.
+			addr := fmt.Sprintf("127.0.0.1:%d", viper.GetInt(option.GopsPort))
+			addrField := logrus.Fields{"address": addr}
+			if err := gops.Listen(gops.Options{
+				Addr:                   addr,
+				ReuseSocketAddrAndPort: true,
+			}); err != nil {
+				log.WithError(err).WithFields(addrField).Fatal("Cannot start gops server")
 			}
+			log.WithFields(addrField).Info("Started gops server")
 
 			initEnv()
 			runOperator()
@@ -157,7 +163,7 @@ func main() {
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
-		os.Exit(-1)
+		os.Exit(1)
 	}
 }
 
@@ -303,7 +309,7 @@ func onOperatorStartLeading(ctx context.Context) {
 			log.Fatalf("%s allocator is not supported by this version of %s", ipamMode, binaryName)
 		}
 
-		if err := alloc.Init(); err != nil {
+		if err := alloc.Init(ctx); err != nil {
 			log.WithError(err).Fatalf("Unable to init %s allocator", ipamMode)
 		}
 
@@ -339,7 +345,7 @@ func onOperatorStartLeading(ctx context.Context) {
 
 	if kvstoreEnabled() {
 		if operatorOption.Config.SyncK8sServices {
-			startSynchronizingServices()
+			operatorWatchers.StartSynchronizingServices(true)
 		}
 
 		var goopts *kvstore.ExtraOptions
@@ -356,7 +362,7 @@ func onOperatorStartLeading(ctx context.Context) {
 				if isETCDOperator {
 					scopedLog.Infof("%s running with service synchronization: automatic etcd service translation enabled", binaryName)
 
-					svcGetter := k8s.ServiceIPGetter(&k8sSvcCache)
+					svcGetter := k8s.ServiceIPGetter(&operatorWatchers.K8sSvcCache)
 
 					name, namespace, err := kvstore.SplitK8sServiceURL(svcURL)
 					if err != nil {
@@ -387,10 +393,7 @@ func onOperatorStartLeading(ctx context.Context) {
 								scopedLog.Warnf("BUG: invalid k8s service: %s", slimSvcObj)
 							}
 							sc.UpdateService(slimSvc, nil)
-							svcGetter = &serviceGetter{
-								shortCutK8sCache: &sc,
-								k8sCache:         &k8sSvcCache,
-							}
+							svcGetter = operatorWatchers.NewServiceGetter(&sc)
 						case errors.IsNotFound(err):
 							scopedLog.Error("Service not found in k8s")
 						default:

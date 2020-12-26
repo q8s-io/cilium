@@ -36,7 +36,7 @@ message Flow {
     // l4
     Layer4 l4 = 6;
 
-    // unused 7
+    reserved 7; // removed, do not use
 
     Endpoint source = 8;
     Endpoint destination = 9;
@@ -46,7 +46,7 @@ message Flow {
     // NodeName is the name of the node from which this Flow was captured.
     string node_name = 11;
 
-    // unused 12
+    reserved 12; // removed, do not use
 
     // all names the source IP can have.
     repeated string source_names = 13;
@@ -56,9 +56,12 @@ message Flow {
     // L7 information. This field is set if and only if FlowType is L7.
     Layer7 l7 = 15;
 
-    bool reply = 16;
+    // Deprecated. This suffers from false negatives due to protobuf not being
+    // able to distinguish between the value being false or it being absent.
+    // Please use is_reply instead.
+    bool reply = 16 [deprecated=true];
 
-    // unused 17-18
+    reserved 17, 18; // removed, do not use
 
     // EventType of the originating Cilium event
     CiliumEventType event_type = 19;
@@ -80,6 +83,11 @@ message Flow {
 
     // only applicable to Verdict = DROPPED.
     DropReason drop_reason_desc = 25;
+
+    // is_reply indicates that this was a packet (L4) or message (L7) in the
+    // reply direction. May be absent (in which case it is unknown whether it
+    // is a reply or not).
+    google.protobuf.BoolValue is_reply = 26;
 
     // This is a temporary workaround to support summary field for pb.Flow without
     // duplicating logic from the old parser. This field will be removed once we
@@ -218,8 +226,9 @@ enum Verdict {
     ERROR = 3;
 }
 
-// Taken from pkg/monitor/api/drop.go. Note that non-drop reasons (i.e. values
-// less than api.DropMin) are not used here.
+// These values are shared with pkg/monitor/api/drop.go and bpf/lib/common.h.
+// Note that non-drop reasons (i.e. values less than api.DropMin) are not used
+// here.
 enum DropReason {
     // non-drop reasons
     DROP_REASON_UNKNOWN = 0;
@@ -311,7 +320,9 @@ message CiliumEventType {
 // FlowFilter represent an individual flow filter. All fields are optional. If
 // multiple fields are set, then all fields must match for the filter to match.
 message FlowFilter {
-    // source_ip filters by a list of source ips
+    // source_ip filters by a list of source ips. Each of the source ips can be
+    // specified as an exact match (e.g. "1.1.1.1") or as a CIDR range (e.g.
+    // "1.1.1.0/24").
     repeated string source_ip = 1;
     // source_pod filters by a list of source pod name prefixes, optionally
     // within a given namespace (e.g. "xwing", "kube-system/coredns-").
@@ -327,7 +338,9 @@ message FlowFilter {
     // supports the same syntax as the source_pod field.
     repeated string source_service = 16;
 
-    // destination_ip filters by a list of destination ips
+    // destination_ip filters by a list of destination ips. Each of the
+    // destination ips can be specified as an exact match (e.g. "1.1.1.1") or
+    // as a CIDR range (e.g. "1.1.1.0/24").
     repeated string destination_ip = 3;
     // destination_pod filters by a list of destination pod names
     repeated string destination_pod = 4;
@@ -367,6 +380,13 @@ message FlowFilter {
     repeated string http_method = 21;
     // http_path is a list of regular expressions to filter on the HTTP path.
     repeated string http_path = 22;
+
+    // tcp_flags filters flows based on TCP header flags
+    repeated TCPFlags tcp_flags = 23;
+
+    // node_name is a list of patterns to filter on the node name, e.g. (e.g.
+    // "k8s*", "test-cluster/*.domain.com", "cluster-name/").
+    repeated string node_name = 24;
 }
 
 // EventType are constants are based on the ones from <linux/perf_event.h>.
@@ -443,6 +463,10 @@ enum LostEventSource {
     // Hubble events queue was full, indicating that the Hubble observer did
     // not keep up.
     OBSERVER_EVENTS_QUEUE = 2;
+
+    // HUBBLE_RING_BUFFER indicates that the event was dropped because it could
+    // not be read from Hubble's ring buffer in time before being overwritten.
+    HUBBLE_RING_BUFFER = 3;
 }
 
 // LostEvent is a message which notifies consumers about a loss of events
@@ -455,4 +479,101 @@ message LostEvent {
     // cpu on which the event was lost if the source of lost events is
     // PERF_EVENT_RING_BUFFER.
     google.protobuf.Int32Value cpu = 3;
+}
+
+// AgentEventType is the type of agent event. These values are shared with type
+// AgentNotification in pkg/monitor/api/types.go
+enum AgentEventType {
+    AGENT_EVENT_UNKNOWN = 0;
+    // used for AGENT_EVENT_GENERIC in monitor API, but there are currently no
+    // such events;
+    reserved 1;
+    AGENT_STARTED = 2;
+    POLICY_UPDATED = 3;
+    POLICY_DELETED = 4;
+    ENDPOINT_REGENERATE_SUCCESS = 5;
+    ENDPOINT_REGENERATE_FAILURE = 6;
+    ENDPOINT_CREATED = 7;
+    ENDPOINT_DELETED = 8;
+    IPCACHE_UPSERTED = 9;
+    IPCACHE_DELETED = 10;
+    SERVICE_UPSERTED = 11;
+    SERVICE_DELETED = 12;
+}
+
+message AgentEvent {
+    AgentEventType type = 1;
+    oneof notification {
+        AgentEventUnknown unknown = 100;
+        TimeNotification agent_start = 101;
+        // used for POLICY_UPDATED and POLICY_DELETED
+        PolicyUpdateNotification policy_update = 102;
+        // used for ENDPOINT_REGENERATE_SUCCESS and ENDPOINT_REGENERATE_FAILURE
+        EndpointRegenNotification endpoint_regenerate = 103;
+        // used for ENDPOINT_CREATED and ENDPOINT_DELETED
+        EndpointUpdateNotification endpoint_update = 104;
+        // used for IPCACHE_UPSERTED and IPCACHE_DELETED
+        IPCacheNotification ipcache_update = 105;
+        ServiceUpsertNotification service_upsert = 106;
+        ServiceDeleteNotification service_delete = 107;
+    }
+}
+
+message AgentEventUnknown {
+    string type = 1;
+    string notification = 2;
+}
+
+message TimeNotification {
+    google.protobuf.Timestamp time = 1;
+}
+
+message PolicyUpdateNotification {
+    repeated string labels = 1;
+    uint64 revision = 2;
+    int64 rule_count = 3;
+}
+
+message EndpointRegenNotification {
+    uint64 id = 1;
+    repeated string labels = 2;
+    string error = 3;
+}
+
+message EndpointUpdateNotification {
+    uint64 id = 1;
+    repeated string labels = 2;
+    string error = 3;
+    string pod_name = 4;
+    string namespace = 5;
+}
+
+message IPCacheNotification {
+    string cidr = 1;
+    uint32 identity = 2;
+    google.protobuf.UInt32Value old_identity = 3;
+    string host_ip = 4;
+    string old_host_ip = 5;
+    uint32 encrypt_key = 6;
+    string namespace = 7;
+    string pod_name = 8;
+}
+
+message ServiceUpsertNotificationAddr {
+    string ip = 1;
+    uint32 port = 2;
+}
+
+message ServiceUpsertNotification {
+    uint32 id = 1;
+    ServiceUpsertNotificationAddr frontend_address = 2;
+    repeated ServiceUpsertNotificationAddr backend_addresses = 3;
+    string type = 4;
+    string traffic_policy = 5;
+    string name = 6;
+    string namespace = 7;
+}
+
+message ServiceDeleteNotification {
+    uint32 id = 1;
 }

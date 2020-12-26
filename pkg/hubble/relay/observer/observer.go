@@ -23,6 +23,7 @@ import (
 	relaypb "github.com/cilium/cilium/api/v1/relay"
 	poolTypes "github.com/cilium/cilium/pkg/hubble/relay/pool/types"
 	"github.com/cilium/cilium/pkg/hubble/relay/queue"
+	"github.com/cilium/cilium/pkg/inctimer"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 
 	"github.com/golang/protobuf/ptypes"
@@ -83,7 +84,8 @@ func sortFlows(
 
 	go func() {
 		defer close(sortedFlows)
-
+		bufferTimer, bufferTimerDone := inctimer.New()
+		defer bufferTimerDone()
 	flowsLoop:
 		for {
 			select {
@@ -100,8 +102,11 @@ func sortFlows(
 					}
 				}
 				pq.Push(flow)
-			case <-time.After(bufferDrainTimeout): // make sure to drain the queue when no new flow responses are received
-				if f := pq.Pop(); f != nil {
+			case t := <-bufferTimer.After(bufferDrainTimeout):
+				// Make sure to drain old flows from the queue when no new
+				// flows are received. The bufferDrainTimeout duration is used
+				// as a sorting window.
+				for _, f := range pq.PopOlderThan(t.Add(-bufferDrainTimeout)) {
 					select {
 					case sortedFlows <- f:
 					case <-ctx.Done():
@@ -120,9 +125,7 @@ func sortFlows(
 				return
 			}
 		}
-
 	}()
-
 	return sortedFlows
 }
 
@@ -211,7 +214,7 @@ func aggregateErrors(
 				}
 
 				pendingResponse = response
-				flushPending = time.After(errorAggregationWindow)
+				flushPending = inctimer.After(errorAggregationWindow)
 			case <-flushPending:
 				select {
 				case aggregated <- pendingResponse:

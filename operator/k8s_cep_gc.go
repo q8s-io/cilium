@@ -23,7 +23,7 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 
@@ -65,7 +65,7 @@ func enableCiliumEndpointSyncGC(once bool) {
 		// If we are running this function "once" it means that we
 		// will delete all CEPs in the cluster regardless of the pod
 		// state.
-		watchers.PodsInit(k8s.WatcherCli(), stopCh)
+		watchers.PodsInit(k8s.WatcherClient(), stopCh)
 	}
 	<-k8sCiliumNodesCacheSynced
 
@@ -131,7 +131,7 @@ func doCiliumEndpointSyncGC(ctx context.Context, once bool, stopCh chan struct{}
 			}
 			if exists {
 				switch pod := podObj.(type) {
-				case *slim_corev1.Node:
+				case *cilium_v2.CiliumNode:
 					continue
 				case *slim_corev1.Pod:
 					// In Kubernetes Jobs, Pods can be left in Kubernetes until the Job
@@ -145,7 +145,7 @@ func doCiliumEndpointSyncGC(ctx context.Context, once bool, stopCh chan struct{}
 					}
 				default:
 					log.WithField(logfields.Object, podObj).
-						Errorf("Saw %T object while expecting *slim_corev1.Pod", podObj)
+						Errorf("Saw %T object while expecting *slim_corev1.Pod or *cilium_v2.CiliumNode", podObj)
 					continue
 				}
 			}
@@ -163,7 +163,7 @@ func doCiliumEndpointSyncGC(ctx context.Context, once bool, stopCh chan struct{}
 			ctx,
 			cep.Name,
 			meta_v1.DeleteOptions{PropagationPolicy: &PropagationPolicy})
-		if !k8serrors.IsNotFound(err) {
+		if err != nil && !k8serrors.IsNotFound(err) {
 			scopedLog.WithError(err).Warning("Unable to delete orphaned CEP")
 			return err
 		}

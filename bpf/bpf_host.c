@@ -7,6 +7,8 @@
 #include <node_config.h>
 #include <ep_config.h>
 
+#define IS_BPF_HOST 1
+
 #define EVENT_SOURCE HOST_EP_ID
 
 /* These are configuration options which have a default value in their
@@ -24,6 +26,11 @@
 #ifdef POD_ENDPOINT
 # undef ENABLE_HOST_FIREWALL
 #endif
+
+/* Controls the inclusion of the CILIUM_CALL_SEND_ICMP6_ECHO_REPLY section in
+ * the bpf_lxc object file.
+ */
+#define SKIP_ICMPV6_ECHO_HANDLING
 
 #include "lib/common.h"
 #include "lib/edt.h"
@@ -65,6 +72,16 @@ static __always_inline int rewrite_dmac_to_host(struct __ctx_buff *ctx,
 					      CTX_ACT_OK, METRIC_INGRESS);
 
 	return CTX_ACT_OK;
+}
+
+#define SECCTX_FROM_IPCACHE_OK	2
+#ifndef SECCTX_FROM_IPCACHE
+# define SECCTX_FROM_IPCACHE	0
+#endif
+
+static __always_inline bool identity_from_ipcache_ok(void)
+{
+	return SECCTX_FROM_IPCACHE == SECCTX_FROM_IPCACHE_OK;
 }
 #endif
 
@@ -144,15 +161,10 @@ resolve_srcid_ipv6(struct __ctx_buff *ctx, __u32 srcid_from_proxy,
 
 	if (from_host)
 		src_id = srcid_from_ipcache;
-#ifdef ENABLE_SECCTX_FROM_IPCACHE
-	/* If we could not derive the secctx from the packet itself but
-	 * from the ipcache instead, then use the ipcache identity. E.g.
-	 * used in ipvlan master device's datapath on ingress.
-	 */
-	else if (src_id == WORLD_ID && !identity_is_reserved(srcid_from_ipcache))
+	else if (src_id == WORLD_ID &&
+		 identity_from_ipcache_ok() &&
+		 !identity_is_reserved(srcid_from_ipcache))
 		src_id = srcid_from_ipcache;
-#endif
-
 	return src_id;
 }
 
@@ -193,10 +205,10 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx, const bool from_host)
 			if (ret < 0)
 				return ret;
 		}
-#if defined(ENCAP_IFINDEX) || (defined(NO_REDIRECT) && !defined(ENABLE_REDIRECT_NEIGH))
-		/* See IPv4 case for NO_REDIRECT/ENABLE_REDIRECT_NEIGH comments */
+#if defined(ENCAP_IFINDEX) || (defined(NO_REDIRECT) && !defined(ENABLE_REDIRECT_FAST))
+		/* See IPv4 case for NO_REDIRECT/ENABLE_REDIRECT_FAST comments */
 		skip_redirect = true;
-#endif /* ENCAP_IFINDEX || (NO_REDIRECT && !ENABLE_REDIRECT_NEIGH) */
+#endif /* ENCAP_IFINDEX || (NO_REDIRECT && !ENABLE_REDIRECT_FAST) */
 		/* Verifier workaround: modified ctx access. */
 		if (!revalidate_data(ctx, &data, &data_end, &ip6))
 			return DROP_INVALID;
@@ -389,16 +401,19 @@ resolve_srcid_ipv4(struct __ctx_buff *ctx, __u32 srcid_from_proxy,
 				/* When SNAT is enabled on traffic ingressing
 				 * into Cilium, all traffic from the world will
 				 * have a source IP of the host. It will only
-				 * actually be from the host if
-				 * "srcid_from_proxy" (passed into this
-				 * function) reports the src as the host. So we
-				 * can ignore the ipcache if it reports the
-				 * source as HOST_ID.
+				 * actually be from the host if "srcid_from_proxy"
+				 * (passed into this function) reports the src as
+				 * the host. So we can ignore the ipcache if it
+				 * reports the source as HOST_ID.
 				 */
 #ifndef ENABLE_EXTRA_HOST_DEV
-				if (from_host && *sec_label != HOST_ID)
-#endif
+				if (*sec_label != HOST_ID)
 					srcid_from_ipcache = *sec_label;
+#else
+				if ((*sec_label != HOST_ID &&
+				     !from_host) || from_host)
+					srcid_from_ipcache = *sec_label;
+#endif /* ENABLE_EXTRA_HOST_DEV */
 			}
 		}
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED4 : DBG_IP_ID_MAP_FAILED4,
@@ -407,15 +422,12 @@ resolve_srcid_ipv4(struct __ctx_buff *ctx, __u32 srcid_from_proxy,
 
 	if (from_host)
 		src_id = srcid_from_ipcache;
-#ifdef ENABLE_SECCTX_FROM_IPCACHE
 	/* If we could not derive the secctx from the packet itself but
-	 * from the ipcache instead, then use the ipcache identity. E.g.
-	 * used in ipvlan master device's datapath on ingress.
+	 * from the ipcache instead, then use the ipcache identity.
 	 */
-	else if (!identity_is_reserved(srcid_from_ipcache))
+	else if (identity_from_ipcache_ok() &&
+		 !identity_is_reserved(srcid_from_ipcache))
 		src_id = srcid_from_ipcache;
-#endif
-
 	return src_id;
 }
 
@@ -443,7 +455,7 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx,
 			if (ret < 0)
 				return ret;
 		}
-#if defined(ENCAP_IFINDEX) || (defined(NO_REDIRECT) && !defined(ENABLE_REDIRECT_NEIGH))
+#if defined(ENCAP_IFINDEX) || (defined(NO_REDIRECT) && !defined(ENABLE_REDIRECT_FAST))
 		/* Without bpf_redirect_neigh() helper, we cannot redirect a
 		 * packet to a local endpoint in the direct routing mode, as
 		 * the redirect bypasses nf_conntrack table. This makes a
@@ -454,7 +466,7 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx,
 		 * do not run into this issue.
 		 */
 		skip_redirect = true;
-#endif /* ENCAP_IFINDEX || (NO_REDIRECT && !ENABLE_REDIRECT_NEIGH) */
+#endif /* ENCAP_IFINDEX || (NO_REDIRECT && !ENABLE_REDIRECT_FAST) */
 		/* Verifier workaround: modified ctx access. */
 		if (!revalidate_data(ctx, &data, &data_end, &ip4))
 			return DROP_INVALID;

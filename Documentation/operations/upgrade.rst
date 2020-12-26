@@ -12,9 +12,8 @@ Upgrade Guide
 
 .. _upgrade_general:
 
-This upgrade guide is intended for Cilium running on Kubernetes. Helm
-commands in this guide use helm3 syntax. If you have questions, feel
-free to ping us on the `Slack channel`.
+This upgrade guide is intended for Cilium running on Kubernetes. If you have
+questions, feel free to ping us on the `Slack channel`.
 
 .. include:: upgrade-warning.rst
 
@@ -25,10 +24,10 @@ Running pre-flight check (Required)
 
 When rolling out an upgrade with Kubernetes, Kubernetes will first terminate the
 pod followed by pulling the new image version and then finally spin up the new
-image. In order to reduce the downtime of the agent, the new image version can
-be pre-pulled. It also verifies that the new image version can be pulled and
-avoids ErrImagePull errors during the rollout. If you are running in :ref:`kubeproxy-free`
-mode you need to also pass on the Kubernetes API Server IP and /
+image. In order to reduce the downtime of the agent and to prevent ErrImagePull
+errors during upgrade, the pre-flight check pre-pulls the new image version.
+If you are running in :ref:`kubeproxy-free`
+mode you must also pass on the Kubernetes API Server IP and /
 or the Kubernetes API Server Port when generating the ``cilium-preflight.yaml``
 file.
 
@@ -81,23 +80,24 @@ file.
         --set k8sServiceHost=API_SERVER_IP \\
         --set k8sServicePort=API_SERVER_PORT
 
-After running the cilium-pre-flight.yaml, make sure the number of READY pods
-is the same number of Cilium pods running.
+After applying the ``cilium-preflight.yaml``, ensure that the number of READY
+pods is the same number of Cilium pods running.
 
 .. code-block:: shell-session
 
-    kubectl get daemonset -n kube-system | grep cilium
+    $ kubectl get daemonset -n kube-system | sed -n '1p;/cilium/p'
     NAME                      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
     cilium                    2         2         2       2            2           <none>          1h20m
     cilium-pre-flight-check   2         2         2       2            2           <none>          7m15s
 
-Once the number of READY pods are the same, make sure the Cilium PreFlight
-deployment is also marked as READY 1/1. In case it shows READY 0/1 please see
-:ref:`cnp_validation`.
+Once the number of READY pods are the equal, make sure the Cilium pre-flight
+deployment is also marked as READY 1/1. If it shows READY 0/1, consult the
+:ref:`cnp_validation` section and resolve issues with the deployment before
+continuing with the upgrade.
 
 .. code-block:: shell-session
 
-    kubectl get deployment -n kube-system cilium-pre-flight-check -w
+    $ kubectl get deployment -n kube-system cilium-pre-flight-check -w
     NAME                      READY   UP-TO-DATE   AVAILABLE   AGE
     cilium-pre-flight-check   1/1     1            0           12s
 
@@ -144,15 +144,22 @@ Step 2: Use Helm to Upgrade your Cilium deployment
 --------------------------------------------------------------------------------------
 
 `Helm` can be used to either upgrade Cilium directly or to generate a new set of
-YAML files that can be used to upgrade an existing deployment. This allows the
-flexibility to use Helm to manage Cilium directly or to apply the resulting file
-using the ``kubectl`` client to install Cilium in your cluster. By default, Helm
-will generate the new templates using the default values files packaged with
-each new release. You still need to ensure that you are specifying the same
-options as used for the initial deployment, either by specifying them at the
-command line or by committing the values to a YAML file:
+YAML files that can be used to upgrade an existing deployment via ``kubectl``.
+By default, Helm will generate the new templates using the default values files
+packaged with each new release. You still need to ensure that you are
+specifying the equivalent options as used for the initial deployment, either by
+specifying a them at the command line or by committing the values to a YAML
+file. The `1.9_helm_options` section describes how to determine the exact
+options that should be set based on the initial options used to install Cilium.
 
 .. include:: ../gettingstarted/k8s-install-download-release.rst
+
+To minimize datapath disruption during the upgrade, the
+``upgradeCompatibility`` option should be set to the initial Cilium
+version which was installed in this cluster. Valid options are:
+
+* ``1.7`` if the initial install was Cilium 1.7.x or earlier.
+* ``1.8`` if the initial install was Cilium 1.8.x.
 
 .. tabs::
   .. group-tab:: kubectl
@@ -162,7 +169,7 @@ command line or by committing the values to a YAML file:
     .. parsed-literal::
 
       helm template |CHART_RELEASE| \\
-        --set keepDeprecatedProbes=true \\
+        --set upgradeCompatibility=1.X \\
         --namespace kube-system \\
         > cilium.yaml
       kubectl apply -f cilium.yaml
@@ -175,11 +182,37 @@ command line or by committing the values to a YAML file:
 
       helm upgrade cilium |CHART_RELEASE| \\
         --namespace=kube-system \\
-        --set keepDeprecatedProbes=true
+        --set upgradeCompatibility=1.X
 
 .. note::
 
-   Make sure that you are using the same options as for the initial deployment.
+   Make sure that you are using the equivalent options as for the initial
+   deployment. Cilium 1.9 renamed many of the Helm options to better support
+   specifying Cilium configuration via a ``values.yaml`` file. Consult the
+   `1.9_helm_options` to determine the 1.9 equivalent options for options you
+   previously specified when initially installing Cilium.
+
+   For example, an 1.8 installation with the following options:
+
+   .. code-block:: txt
+
+      --namespace=kube-system \\
+      --set global.k8sServiceHost=API_SERVER_IP \\
+      --set global.k8sServicePort=API_SERVER_PORT \\
+      --set config.ipam=kubernetes \\
+      --set global.kubeProxyReplacement=strict
+
+
+   Can be upgraded using the options below:
+
+   .. code-block:: txt
+
+      --namespace=kube-system \\
+      --set upgradeCompatibility=1.8 \\
+      --set k8sServiceHost=API_SERVER_IP \\
+      --set k8sServicePort=API_SERVER_PORT \\
+      --set ipam.mode=kubernetes \\
+      --set kubeProxyReplacement=strict
 
    Instead of using ``--set``, you can also save the values relative to your
    deployment in a YAML file and use it to regenerate the YAML for the latest
@@ -188,19 +221,23 @@ command line or by committing the values to a YAML file:
    options, either by setting them at the command line or storing them in a
    YAML file, similar to:
 
-   .. .. parsed-literal::
+   .. code-block:: yaml
 
-    agent: true
-    keepDepreatedProbes: true
+      agent: true
+      upgradeCompatibility: "1.8"
+      ipam:
+        mode: "kubernetes"
+      k8sServiceHost: "API_SERVER_IP"
+      k8sServicePort: "API_SERVER_PORT"
+      kubeProxyReplacement: "strict"
 
-
-   You can then pass the values file to Helm by running:
+   You can then upgrade using this values file by running:
 
    .. parsed-literal::
 
-     helm upgrade cilium |CHART_RELEASE| \\
-       --namespace=kube-system \\
-       -f my-values.yaml
+      helm upgrade cilium |CHART_RELEASE| \\
+        --namespace=kube-system \\
+        -f my-values.yaml
 
 Step 3: Rolling Back
 --------------------
@@ -228,12 +265,11 @@ Cilium to the state it was in prior to the upgrade.
 .. note::
 
     When rolling back after new features of the new minor version have already
-    been consumed, consult an eventual existing downgrade section in the
-    :ref:`version_notes` to check and prepare for incompatible feature use
-    before downgrading/rolling back. This step is only required after new
-    functionality introduced in the new minor version has already been
-    explicitly used by importing policy or by opting into new features via the
-    `ConfigMap`.
+    been consumed, consult the :ref:`version_notes` to check and prepare for
+    incompatible feature use before downgrading/rolling back. This step is only
+    required after new functionality introduced in the new minor version has
+    already been explicitly used by creating new resources or by opting into
+    new features via the `ConfigMap`.
 
 .. _version_notes:
 .. _upgrade_version_specifics:
@@ -253,31 +289,33 @@ combination is not listed in the table below, then it may not be safe. In that
 case, consider staging the upgrade, for example upgrading from ``1.1.x`` to the
 latest ``1.1.y`` release before subsequently upgrading to ``1.2.z``.
 
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| Current version       | Target version        | Full YAML update | L3 impact               | L7 impact                 |
-+=======================+=======================+==================+=========================+===========================+
-| ``1.0.x``             | ``1.1.y``             | Required         | N/A                     | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.1.x``             | ``1.2.y``             | Required         | Temporary disruption[2] | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.2.x``             | ``1.3.y``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``>=1.2.5``           | ``1.5.y``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.5.x``             | ``1.6.y``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.6.x``             | ``1.6.6``             | Not required     | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.6.x``             | ``1.6.7``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.6.x``             | ``1.7.y``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``1.7.0``             | ``1.7.1``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``>=1.7.1``           | ``1.7.y``             | Not required     | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
-| ``>=1.7.1``           | ``1.8.y``             | Required         | Minimal to None         | Clients must reconnect[1] |
-+-----------------------+-----------------------+------------------+-------------------------+---------------------------+
++-----------------------+-----------------------+-------------------------+---------------------------+
+| Current version       | Target version        | L3 impact               | L7 impact                 |
++=======================+=======================+=========================+===========================+
+| ``1.0.x``             | ``1.1.y``             | N/A                     | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.1.x``             | ``1.2.y``             | Temporary disruption[2] | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.2.x``             | ``1.3.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``>=1.2.5``           | ``1.5.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.5.x``             | ``1.6.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.6.x``             | ``1.6.6``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.6.x``             | ``1.6.7``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.6.x``             | ``1.7.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.7.0``             | ``1.7.1``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``>=1.7.1``           | ``1.7.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``>=1.7.1``           | ``1.8.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
+| ``1.8.x``             | ``1.9.y``             | Minimal to None         | Clients must reconnect[1] |
++-----------------------+-----------------------+-------------------------+---------------------------+
 
 Annotations:
 
@@ -290,7 +328,73 @@ Annotations:
    upgrade. Connections should successfully re-establish without requiring
    clients to reconnect.
 
+.. _current_release_required_changes:
+
+.. _1.10_upgrade_notes:
+
+1.10 Upgrade Notes
+------------------
+
+* Cilium has bumped the minimal Kubernetes version supported to v1.13.0.
+
+Removed Metrics/Labels
+~~~~~~~~~~~~~~~~~~~~~~
+
+The following metrics have been removed:
+
+* ``cilium_endpoint_regenerations`` is removed. Please use ``cilium_endpoint_regenerations_total`` instead.
+* ``cilium_k8s_client_api_calls_counter`` is removed. Please use ``cilium_k8s_client_api_calls_total`` instead.
+* ``cilium_identity_count`` is removed. Please use ``cilium_identity`` instead.
+* ``cilium_policy_count`` is removed. Please use ``cilium_policy`` instead.
+* ``cilium_policy_import_errors`` removed. Please use ``cilium_policy_import_errors_total`` instead.
+* Label ``mapName`` in ``cilium_bpf_map_ops_total`` is removed. Please use label ``map_name`` instead.
+* Label ``eventType`` in ``cilium_nodes_all_events_received_total`` removed. Please use label ``event_type`` instead.
+* Label ``responseCode`` in ``*api_duration_seconds`` removed. Please use label ``response_code`` instead.
+* Label ``subnetId`` in ``cilium_operator_ipam_allocation_ops`` is removed. Please use label ``subnet_id`` instead.
+* Label ``subnetId`` in ``cilium_operator_ipam_release_ops`` is removed. Please use label ``subnet_id`` instead.
+* Label ``subnetId`` and ``availabilityZone`` in ``cilium_operator_ipam_available_ips_per_subnet`` are removed. Please
+  use label ``subnet_id`` and ``availability_zone`` instead.
+
+New Options
+~~~~~~~~~~~
+
+* ``enable-ipv6-masquerade``: This option can be used to enable/disable masquerading
+  for IPv6 traffic. Currently the only mode supported is ``iptables`` with BPF based
+  IPv6 masquerading in the roadmap.
+* ``enable-ipv4-masquerade``: This option enables/disables masquerading for IPv4 traffic
+  and has the same desired effect as ``masquerade`` option.
+
+Removed Options
+~~~~~~~~~~~~~~~
+
+* ``k8s-watcher-queue-size``: this option does not have any effect since 1.8 and
+  is now removed.
+* ``blacklist-conflicting-routes``: this option does not have any effect since
+  1.9 and is now removed.
+* ``device``: this option was deprecated in 1.9 in favor of ``devices`` and is
+  now removed.
+* ``crd-wait-timeout``: this option does not have any effect since 1.9 and is
+  now removed.
+
+Deprecated Options
+~~~~~~~~~~~~~~~~~~
+
+* ``bpf-compile-debug``: This option does not have any effect since 1.10
+  and is planned to be removed in 1.11.
+* ``k8s-force-json-patch``: This option does not have any effect for
+  environments running Kubernetes >= 1.13. Marked for removal in Cilium v1.11.
+* ``masquerade``: With the introduction of IPv6 masquerading this option has
+  been deprecated in favor of ``enable-ipv4-masquerade`` and is planned to
+  be removed in 1.11. For 1.10 release this option will have the same effect as
+  ``enable-ipv4-masquerade`` where both options must not be used simultaneously.
+
 .. _1.9_upgrade_notes:
+
+1.9.1 Upgrade Notes
+-------------------
+
+* Helm option ``nodeSelector`` is removed, please use the option for respective component
+  (e.g. ``operator.nodeSelector``, ``etcd.nodeSelector`` and ``preflight.nodeSelector``) instead.
 
 1.9 Upgrade Notes
 -----------------
@@ -305,23 +409,41 @@ Annotations:
 
   - ``hubble.tls.enabled=false``
   - ``hubble.tls.auto.enabled=false``
-* Cilium has upgraded its CRDs to v1, from v1beta1. Users must run the
-  pre-flight checker mentioned above. The pre-flight check will ensure the
-  custom resources installed inside the cluster are well-formed.
+* Cilium has upgraded its CRDs to v1, from v1beta1. Users must
+  `run the preflight checker <pre_flight>` to ensure that the custom resources
+  installed inside the cluster are well-formed.
 * The Cilium agent is now enforcing API rate limits for certain API calls. See
-  :ref:``api_rate_limiting`` for more information.
+  :ref:`api_rate_limiting` for more information.
 * Cilium Helm charts have been completely re-factored. Most of the values used
   to drive Helm charts have been re-scoped from global values to be part of a
-  single `Cilium`_, Helm chart. When upgrading from a previous version of Cilium,
+  single Cilium Helm chart. When upgrading from a previous version of Cilium,
   the values will need to be provided using the new structure. In most cases the
   prefixes of ``global.``, ``agent.``, and ``config.`` can be dropped from the
   previously used value name. As an example, if you previously ran the command
   ``helm install --set global.ipv4.enabled=true`` you would now run ``helm
-  install --set ipv4.enabled=true``. See the following table which calls out
-  specific values where the prefix cannot be simply dropped, followed by a full
+  install --set ipv4.enabled=true``. The following section calls out specific
+  values where the prefix cannot be simply dropped followed by a full
   table of old and new Helm values.
+* On Linux kernel v5.10 and above, running the agent with BPF kube-proxy replacement
+  under direct routing operation as well as BPF-based masquerading will bypass
+  subsystems like netfilter/iptables in the host namespace in order to significantly
+  improve throughput and latency for the BPF datapath given routing is not performed
+  in the host stack but directly in BPF instead. To opt-out from this behavior,
+  the Helm option ``bpf.hostRouting=true`` can be used. If the underlying kernel
+  does not implement the needed BPF features, then the agent will fallback and rely
+  on host routing automatically.
+* For the agent, operator, clustermesh-apiserver and hubble-relay, the gops listener
+  has been mapped to fixed ports instead of port auto-binding. Meaning, the agent's
+  gops server will listen on 9890, the operator on 9891, the clustermesh-apiserver on
+  9892, and hubble-relay on port 9893 by default. If needed, the port can also be
+  remapped for each through using the ``--gops-port`` flag.
 
-  The following values have been renamed:
+.. _1.9_helm_options:
+
+1.9 Helm options
+~~~~~~~~~~~~~~~~
+
+The following values have been renamed:
 
 +----------------------------------------------+--------------------------------------------+
 | <= v1.8.x Value                              | >= 1.9.x Renamed Value                     |
@@ -331,8 +453,6 @@ Annotations:
 | config.bpfMasquerade                         | bpf.masquerade                             |
 +----------------------------------------------+--------------------------------------------+
 | config.bpfClockProbe                         | bpf.clockProbe                             |
-+----------------------------------------------+--------------------------------------------+
-| config.bpfTProxy                             | bpf.tproxy                                 |
 +----------------------------------------------+--------------------------------------------+
 | config.ipam                                  | ipam.mode                                  |
 +----------------------------------------------+--------------------------------------------+
@@ -346,8 +466,12 @@ Annotations:
 +----------------------------------------------+--------------------------------------------+
 | operator.numReplicas                         | operator.replicas                          |
 +----------------------------------------------+--------------------------------------------+
+| global.nodePort.acceleration                 | loadBalancer.acceleration                  |
++----------------------------------------------+--------------------------------------------+
+| global.nodePort.mode                         | loadBalancer.mode                          |
++----------------------------------------------+--------------------------------------------+
 
-  The full list of updated Helm values:
+Full list of updated Helm values:
 
 +----------------------------------------------+--------------------------------------------+
 | <= v1.8.x Value                              | >= 1.9.x Value                             |
@@ -582,6 +706,10 @@ Annotations:
 +----------------------------------------------+--------------------------------------------+
 | global.ipvlan.masterDevice                   | ipvlan.masterDevice                        |
 +----------------------------------------------+--------------------------------------------+
+| global.k8sServiceHost                        | k8sServiceHost                             |
++----------------------------------------------+--------------------------------------------+
+| global.k8sServicePort                        | k8sServicePort                             |
++----------------------------------------------+--------------------------------------------+
 | global.k8s.requireIPv4PodCIDR                | k8s.requireIPv4PodCIDR                     |
 +----------------------------------------------+--------------------------------------------+
 | agent.keepDeprecatedLabels                   | keepDeprecatedLabels                       |
@@ -602,7 +730,7 @@ Annotations:
 +----------------------------------------------+--------------------------------------------+
 | agent.monitor.*                              | monitor.*                                  |
 +----------------------------------------------+--------------------------------------------+
-| global.nodePort.acceleration                 | nodePort.acceleration                      |
+| global.nodePort.acceleration                 | loadBalancer.acceleration                  |
 +----------------------------------------------+--------------------------------------------+
 | global.nodePort.autoProtectPortRange         | nodePort.autoProtectPortRange              |
 +----------------------------------------------+--------------------------------------------+
@@ -612,7 +740,7 @@ Annotations:
 +----------------------------------------------+--------------------------------------------+
 | global.nodePort.enabled                      | nodePort.enabled                           |
 +----------------------------------------------+--------------------------------------------+
-| global.nodePort.mode                         | nodePort.mode                              |
+| global.nodePort.mode                         | loadBalancer.mode                          |
 +----------------------------------------------+--------------------------------------------+
 | global.nodePort.range                        | nodePort.range                             |
 +----------------------------------------------+--------------------------------------------+
@@ -674,10 +802,6 @@ Annotations:
 +----------------------------------------------+--------------------------------------------+
 | global.tunnel                                | tunnel                                     |
 +----------------------------------------------+--------------------------------------------+
-| global.wellKnownIdentities.enabled           | wellKnownIdentities.enabled                |
-+----------------------------------------------+--------------------------------------------+
-
-.. _Cilium: \ |SCM_WEB|\/install/kubernetes/cilium/values.yaml
 
 Renamed Metrics
 ~~~~~~~~~~~~~~~
@@ -718,11 +842,18 @@ Deprecated Metrics/Labels
   * Label ``scope`` in ``cilium_endpoint_regeneration_time_stats_seconds`` had its ``buildDuration`` value renamed to ``total``.
   * Label ``scope`` in ``cilium_policy_regeneration_time_stats_seconds`` had its ``buildDuration`` value renamed to ``total``.
 
+Deprecated options
+~~~~~~~~~~~~~~~~~~
+
+* ``k8s-watcher-queue-size``: This option does not have any effect since 1.8
+  and is planned to be removed in 1.10.
+
 Removed options
 ~~~~~~~~~~~~~~~
 
-* ``disable-ipv4``, ``ipv4-cluster-cidr-mask-size``, ``keep-bpf-templates``:
-  These options were deprecated in Cilium 1.8 and are now removed.
+* ``disable-ipv4``, ``ipv4-cluster-cidr-mask-size``, ``keep-bpf-templates``,
+  ``disable-k8s-services``: These options were deprecated in Cilium 1.8 and
+  are now removed.
 * The ``prometheus-serve-addr-deprecated`` option is now removed. Please use
   ``prometheus-serve-addr`` instead.
 * The ``hostscope-legacy`` option value for ``ipam`` is now removed. The ``ipam``
@@ -761,8 +892,6 @@ Removed cilium-operator options
 
 1.8 Upgrade Notes
 -----------------
-
-.. _current_release_required_changes:
 
 .. _1.8_required_changes:
 
@@ -1341,124 +1470,6 @@ Removed options
 
 * All code associated with ``monitor v1.0`` socket handling has been removed.
 
-.. _1.6_upgrade_notes:
-
-1.6 Upgrade Notes
------------------
-
-.. _1.6_required_changes:
-
-IMPORTANT: Changes required before upgrading to 1.6.0
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. warning::
-
-   Do not upgrade to 1.6.0 before reading the following section and completing
-   the required steps.
-
-* The ``kvstore`` and ``kvstore-opt`` options have been moved from the
-  `DaemonSet` into the `ConfigMap`. For many users, the DaemonSet definition
-  was not considered to be under user control as the upgrade guide requests to
-  apply the latest definition. Doing so for 1.6.0 without adding these options
-  to the `ConfigMap` which is under user control would result in those settings
-  to refer back to its default values.
-
-  *Required action:*
-
-  Add the following two lines to the ``cilium-config`` `ConfigMap`:
-
-  .. code:: bash
-
-     kvstore: etcd
-     kvstore-opt: '{"etcd.config": "/var/lib/etcd-config/etcd.config"}'
-
-  This will preserve the existing behavior of the DaemonSet. Adding the options
-  to the `ConfigMap` will not impact the ability to rollback. Cilium 1.5.y and
-  earlier are compatible with the options although their values will be ignored
-  as both options are defined in the `DaemonSet` definitions for these versions
-  which takes precedence over the `ConfigMap`.
-
-* **Downgrade warning:** Be aware that if you want to change the
-  ``identity-allocation-mode`` from ``kvstore`` to ``crd`` in order to no
-  longer depend on the kvstore for identity allocation, then a
-  rollback/downgrade requires you to revert that option and it will result in
-  brief disruptions of all connections as identities are re-created in the
-  kvstore.
-
-Upgrading from >=1.5.0 to 1.6.y
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-#. Follow the standard procedures to perform the upgrade as described in
-   :ref:`upgrade_minor`. Users running older versions should first upgrade to
-   the latest v1.5.x point release to minimize disruption of service
-   connections during upgrade.
-
-Changes that may require action
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-  * The CNI configuration file auto-generated by Cilium
-    (``/etc/cni/net.d/05-cilium.conf``) is now always automatically overwritten
-    unless the environment variable ``CILIUM_CUSTOM_CNI_CONF`` is set in which
-    case any already existing configuration file is untouched.
-
-  * The new default value for the option ``monitor-aggregation`` is now
-    ``medium`` instead of ``none``. This will cause the eBPF datapath to
-    perform more aggressive aggregation on packet forwarding related events to
-    reduce CPU consumption while running ``cilium monitor``. The automatic
-    change only applies to the default ConfigMap. Existing deployments will
-    need to change the setting in the ConfigMap explicitly.
-
-  * Any new Cilium deployment on Kubernetes using the default ConfigMap will no
-    longer fetch the container runtime specific labels when an endpoint is
-    created and solely rely on the pod, namespace and ServiceAccount labels.
-    Previously, Cilium also scraped labels from the container runtime which we
-    are also pod labels and prefixed those with ``container:``. We have seen
-    less and less use of container runtime specific labels by users so it is no
-    longer justified for every deployment to pay the cost of interacting with
-    the container runtime by default. Any new deployment wishing to apply
-    policy based on container runtime labels, must change the ConfigMap option
-    ``container-runtime`` to ``auto`` or specify the container runtime to use.
-
-    Existing deployments will continue to interact with the container runtime
-    to fetch labels which are known to the runtime but not known to Kubernetes
-    as pod labels. If you are not using container runtime labels, consider
-    disabling it to reduce resource consumption on each by setting the option
-    ``container-runtime`` to ``none`` in the ConfigMap.
-
-New ConfigMap Options
-~~~~~~~~~~~~~~~~~~~~~
-
-  * ``cni-chaining-mode`` has been added to automatically generate CNI chaining
-    configurations with various other plugins. See the section
-    :ref:`cni_chaining` for a list of supported CNI chaining plugins.
-
-  * ``identity-allocation-mode`` has been added to allow selecting the identity
-    allocation method. The default for new deployments is ``crd`` as per
-    default ConfigMap. Existing deployments will continue to use ``kvstore``
-    unless opted into new behavior via the ConfigMap.
-
-Deprecated options
-~~~~~~~~~~~~~~~~~~
-
-* ``enable-legacy-services``: This option was introduced to ease the transition
-  between Cilium 1.4.x and 1.5.x releases, allowing smooth upgrade and
-  downgrade. As of 1.6.0, it is deprecated. Subsequently downgrading from 1.6.x
-  or later to 1.4.x may result in disruption of connections that connect via
-  services.
-
-* ``lb``: The ``--lb`` feature has been deprecated. It has not been in use and
-  has not been well tested. If you need load-balancing on a particular device,
-  ping the development team on Slack to discuss options to get the feature
-  fully supported.
-
-Deprecated metrics
-~~~~~~~~~~~~~~~~~~
-
-* ``policy_l7_parse_errors_total``: Use ``policy_l7_total`` instead.
-* ``policy_l7_forwarded_total``: Use ``policy_l7_total`` instead.
-* ``policy_l7_denied_total``: Use ``policy_l7_total`` instead.
-* ``policy_l7_received_total``: Use ``policy_l7_total`` instead.
-
 Advanced
 ========
 
@@ -1796,7 +1807,7 @@ sense of security to the user if a policy is badly formatted and Cilium is not
 enforcing that policy due a bad validation schema. This CNP Validator is
 automatically executed as part of the pre-flight check :ref:`pre_flight`.
 
-Start by deployment the ``cilium-pre-flight-check`` and check if the the
+Start by deployment the ``cilium-pre-flight-check`` and check if the
 ``Deployment`` shows READY 1/1, if it does not check the pod logs.
 
 .. code-block:: shell-session

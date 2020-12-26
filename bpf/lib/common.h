@@ -13,6 +13,7 @@
 
 #include "endian.h"
 #include "mono.h"
+#include "config.h"
 
 /* FIXME: GH-3239 LRU logic is not handling timeouts gracefully enough
  * #ifndef HAVE_LRU_HASH_MAP_TYPE
@@ -327,6 +328,9 @@ enum {
 /* Cilium error codes, must NOT overlap with TC return codes.
  * These also serve as drop reasons for metrics,
  * where reason > 0 corresponds to -(DROP_*)
+ *
+ * These are shared with pkg/monitor/api/drop.go and api/v1/flow/flow.proto.
+ * When modifying any of the below, those files should also be updated.
  */
 #define DROP_UNUSED1		-130 /* unused */
 #define DROP_UNUSED2		-131 /* unused */
@@ -386,6 +390,9 @@ enum {
 /* Cilium metrics reasons for forwarding packets and other stats.
  * If reason is larger than below then this is a drop reason and
  * value corresponds to -(DROP_*), see above.
+ *
+ * These are shared with pkg/monitor/api/drop.go.
+ * When modifying any of the below, those files should also be updated.
  */
 #define REASON_FORWARDED		0
 #define REASON_PLAINTEXT		3
@@ -394,6 +401,8 @@ enum {
 #define REASON_LB_NO_BACKEND		6
 #define REASON_LB_REVNAT_UPDATE		7
 #define REASON_LB_REVNAT_STALE		8
+#define REASON_FRAG_PACKET		9
+#define REASON_FRAG_PACKET_UPDATE	10
 
 /* Lookup scope for externalTrafficPolicy=Local */
 #define LB_LOOKUP_SCOPE_EXT	0
@@ -402,6 +411,7 @@ enum {
 /* Cilium metrics direction for dropping/forwarding packet */
 #define METRIC_INGRESS  1
 #define METRIC_EGRESS   2
+#define METRIC_SERVICE  3
 
 /* Magic ctx->mark identifies packets origination and encryption status.
  *
@@ -498,22 +508,23 @@ static __always_inline __u32 or_encrypt_key(__u8 key)
 /* ctx_{load,store}_meta() usage: */
 enum {
 	CB_SRC_LABEL,
-#define	CB_SVC_PORT		CB_SRC_LABEL	/* Alias, non-overlapping */
+#define	CB_PORT			CB_SRC_LABEL	/* Alias, non-overlapping */
+#define	CB_HINT			CB_SRC_LABEL	/* Alias, non-overlapping */
 #define	CB_PROXY_MAGIC		CB_SRC_LABEL	/* Alias, non-overlapping */
 #define	CB_ENCRYPT_MAGIC	CB_SRC_LABEL	/* Alias, non-overlapping */
 	CB_IFINDEX,
-#define	CB_SVC_ADDR_V4		CB_IFINDEX	/* Alias, non-overlapping */
-#define	CB_SVC_ADDR_V6_1	CB_IFINDEX	/* Alias, non-overlapping */
+#define	CB_ADDR_V4		CB_IFINDEX	/* Alias, non-overlapping */
+#define	CB_ADDR_V6_1		CB_IFINDEX	/* Alias, non-overlapping */
 #define	CB_ENCRYPT_IDENTITY	CB_IFINDEX	/* Alias, non-overlapping */
 #define	CB_IPCACHE_SRC_LABEL	CB_IFINDEX	/* Alias, non-overlapping */
 	CB_POLICY,
-#define	CB_SVC_ADDR_V6_2	CB_POLICY	/* Alias, non-overlapping */
+#define	CB_ADDR_V6_2		CB_POLICY	/* Alias, non-overlapping */
 	CB_NAT46_STATE,
 #define CB_NAT			CB_NAT46_STATE	/* Alias, non-overlapping */
-#define	CB_SVC_ADDR_V6_3	CB_NAT46_STATE	/* Alias, non-overlapping */
+#define	CB_ADDR_V6_3		CB_NAT46_STATE	/* Alias, non-overlapping */
 #define	CB_FROM_HOST		CB_NAT46_STATE	/* Alias, non-overlapping */
 	CB_CT_STATE,
-#define	CB_SVC_ADDR_V6_4	CB_CT_STATE	/* Alias, non-overlapping */
+#define	CB_ADDR_V6_4		CB_CT_STATE	/* Alias, non-overlapping */
 #define	CB_ENCRYPT_DST		CB_CT_STATE	/* Alias, non-overlapping,
 						 * Not used by xfrm.
 						 */
@@ -559,7 +570,11 @@ enum {
 	SVC_FLAG_LOADBALANCER = (1 << 5),  /* LoadBalancer service */
 	SVC_FLAG_ROUTABLE     = (1 << 6),  /* Not a surrogate/ClusterIP entry */
 	SVC_FLAG_SOURCE_RANGE = (1 << 7),  /* Check LoadBalancer source range */
-	SVC_FLAG_LOCALREDIRECT = (1 << 8),  /* local redirect */
+};
+
+/* Service flags (lb{4,6}_service->flags2) */
+enum {
+	SVC_FLAG_LOCALREDIRECT = (1 << 0),  /* local redirect */
 };
 
 struct ipv6_ct_tuple {
@@ -632,7 +647,7 @@ struct lb6_key {
 	union v6addr address;	/* Service virtual IPv6 address */
 	__be16 dport;		/* L4 port filter, if unset, all ports apply */
 	__u16 backend_slot;	/* Backend iterator, 0 indicates the svc frontend */
-	__u8 proto;		/* L4 protocol */
+	__u8 proto;		/* L4 protocol, currently not used (set to 0) */
 	__u8 scope;		/* LB_LOOKUP_SCOPE_* for externalTrafficPolicy=Local */
 	__u8 pad[2];
 };
@@ -680,7 +695,7 @@ struct lb4_key {
 	__be32 address;		/* Service virtual IPv4 address */
 	__be16 dport;		/* L4 port filter, if unset, all ports apply */
 	__u16 backend_slot;	/* Backend iterator, 0 indicates the svc frontend */
-	__u8 proto;		/* L4 protocol */
+	__u8 proto;		/* L4 protocol, currently not used (set to 0) */
 	__u8 scope;		/* LB_LOOKUP_SCOPE_* for externalTrafficPolicy=Local */
 	__u8 pad[2];
 };
@@ -796,15 +811,21 @@ struct lb6_src_range_key {
 	union v6addr addr;
 };
 
-static __always_inline int redirect_peer(int ifindex __maybe_unused,
-					 __u32 flags __maybe_unused)
+static __always_inline int redirect_ep(int ifindex __maybe_unused,
+				       bool needs_backlog __maybe_unused)
 {
 	/* If our datapath has proper redirect support, we make use
 	 * of it here, otherwise we terminate tc processing by letting
 	 * stack handle forwarding e.g. in ipvlan case.
+	 *
+	 * Going via CPU backlog queue (aka needs_backlog) is required
+	 * whenever we cannot do a fast ingress -> ingress switch but
+	 * instead need an ingress -> egress netns traversal or vice
+	 * versa.
 	 */
 #ifdef ENABLE_HOST_REDIRECT
-	return redirect(ifindex, flags);
+	return needs_backlog || !is_defined(ENABLE_REDIRECT_FAST) ?
+	       redirect(ifindex, 0) : redirect_peer(ifindex, 0);
 #else
 	return CTX_ACT_OK;
 #endif /* ENABLE_HOST_REDIRECT */

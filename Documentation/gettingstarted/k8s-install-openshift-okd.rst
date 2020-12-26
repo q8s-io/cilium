@@ -31,8 +31,10 @@ OpenShift Requirements
      doesn't simply pickup ``az login`` credentials. It's recommended to
      setup a dedicated service principal and use it
    - with the GCP provider ``openshift-install`` will only work with a service
-     account key, which has to be set using ``GOOGLE_APPLICATION_CREDENTIALS``
-     environment variable (e.g. ``GOOGLE_APPLICATION_CREDENTIALS=service-account.json``)
+     account key, which has to be set using ``GOOGLE_CREDENTIALS``
+     environment variable (e.g. ``GOOGLE_CREDENTIALS=service-account.json``).
+     Follow `Openshift Installer documentation <https://github.com/openshift/installer/blob/master/docs/user/gcp/iam.md>`_
+     to assign required roles to your service account.
 
 Create an OpenShift OKD Cluster
 ===============================
@@ -50,7 +52,7 @@ Now, create configuration files:
    The sample output below is showing the AWS provider, but
    it should work the same way with other providers.
 
-.. code:: shell-session
+.. code-block:: shell-session
 
    $ openshift-install create install-config --dir "${CLUSTER_NAME}"
    ? SSH Public Key ~/.ssh/id_rsa.pub
@@ -161,11 +163,9 @@ Copy Cilium manifest to ``${CLUSTER_NAME}/manifests``:
 
 .. code:: bash
 
-   for component in config agent operator
-      do for resource in cilium/charts/${component}/templates/*
-          do cp "${resource}" "${CLUSTER_NAME}/manifests/cluster-network-04-cilium-${component}-$(basename ${resource})"
-      done
-   done
+    for resource in cilium/templates/*
+        do cp "${resource}" "${CLUSTER_NAME}/manifests/cluster-network-04-cilium-$(basename ${resource})"
+    done
 
 Create the cluster:
 
@@ -174,7 +174,7 @@ Create the cluster:
    The sample output below is showing the AWS provider, but
    it should work the same way with other providers.
 
-.. code:: shell-session
+.. code-block:: shell-session
 
    $ openshift-install create cluster --dir "${CLUSTER_NAME}"
    WARNING   Discarding the Bootstrap Ignition Config that was provided in the target directory because its dependencies are dirty and it needs to be regenerated
@@ -196,11 +196,12 @@ Please note that ``openshift-install`` doesn't support custom firewall
 rules, so you will need to use one of the following scripts if you are
 using AWS or GCP. Azure does not need additional configuration.
 
-.. note::
+.. warning::
 
-   This has to be done just after ``INFO Waiting up to 40m0s for
-   bootstrapping to complete...`` appears in the logs. It is safe to apply
-   these changes once, OpenShift will not override these.
+   **You need to execute the following command to configure firewall rules just after**
+   ``INFO Waiting up to 40m0s for bootstrapping to complete...`` **appears in the logs,
+   or the installation will fail**. It is safe to apply these changes once, OpenShift will
+   not override these.
 
 .. tabs::
 

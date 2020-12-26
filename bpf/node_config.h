@@ -118,7 +118,6 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 #ifndef SKIP_DEBUG
 #define LB_DEBUG
 #endif
-#define POLICY_VERDICT_NOTIFY
 #define MONITOR_AGGREGATION 5
 #define MTU 1500
 #define EPHEMERAL_MIN 32768
@@ -146,9 +145,13 @@ DEFINE_IPV6(HOST_IP, 0xbe, 0xef, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0xa, 0x
 # define DIRECT_ROUTING_DEV_IFINDEX 0
 # ifdef ENABLE_IPV4
 #  define IPV4_DIRECT_ROUTING 0
+#  define IPV4_RSS_PREFIX IPV4_DIRECT_ROUTING
+#  define IPV4_RSS_PREFIX_BITS 32
 # endif
 # ifdef ENABLE_IPV6
 #  define IPV6_DIRECT_ROUTING { .addr = { 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } }
+#  define IPV6_RSS_PREFIX IPV6_DIRECT_ROUTING
+#  define IPV6_RSS_PREFIX_BITS 128
 # endif
 #endif
 

@@ -13,6 +13,13 @@ metadata:
   name: cilium-operator
   namespace: kube-system
 ---
+# Source: cilium/templates/hubble-generate-certs-serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hubble-generate-certs
+  namespace: kube-system
+---
 # Source: cilium/templates/hubble-relay-serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -50,6 +57,10 @@ data:
 
   # If you want to run cilium in debug mode change this value to true
   debug: "false"
+  # The agent can be put into the following three policy enforcement modes
+  # default, always and never.
+  # https://docs.cilium.io/en/latest/policy/intro/#policy-enforcement-modes
+  enable-policy: "default"
 
   # Enable IPv4 addressing. If enabled, all endpoints are allocated an IPv4
   # address.
@@ -62,7 +73,6 @@ data:
   # custom-cni-conf to "true", otherwise Cilium may overwrite the configuration.
   custom-cni-conf: "false"
   enable-bpf-clock-probe: "true"
-  enable-bpf-tproxy: "true"
   # If you want cilium monitor to aggregate tracing for packets, set this level
   # to "low", "medium", or "maximum". The higher the level, the less packets
   # that will be seen in monitor output.
@@ -98,9 +108,8 @@ data:
   #
   # If this value is modified, then during the next Cilium startup the restore
   # of existing endpoints and tracking of ongoing connections may be disrupted.
-  # This may lead to policy drops or a change in loadbalancing decisions for a
-  # connection for some time. Endpoints may need to be recreated to restore
-  # connectivity.
+  # As a result, reply packets may be dropped and the load-balancing decisions
+  # for established connections may change.
   #
   # If this option is set to "false" during an upgrade from 1.3 or earlier to
   # 1.4 or later, then it may cause one-time disruptions during the upgrade.
@@ -110,20 +119,26 @@ data:
   # container image names
   sidecar-istio-proxy-image: "cilium/istio_proxy"
 
+  # Name of the cluster. Only relevant when building a mesh of clusters.
+  cluster-name: default
+  # Unique ID of the cluster. Must be unique across all conneted clusters and
+  # in the range of 1 and 255. Only relevant when building a mesh of clusters.
+  cluster-id: ""
+
   # Encapsulation mode for communication between nodes
   # Possible values:
   #   - disabled
   #   - vxlan (default)
   #   - geneve
   tunnel: vxlan
-
-  # Name of the cluster. Only relevant when building a mesh of clusters.
-  cluster-name: default
+  # Enables L7 proxy for L7 policy enforcement and visibility
+  enable-l7-proxy: "true"
 
   # wait-bpf-mount makes init container wait until bpf filesystem is mounted
   wait-bpf-mount: "false"
 
-  masquerade: "true"
+  enable-ipv4-masquerade: "true"
+  enable-ipv6-masquerade: "true"
   enable-bpf-masquerade: "true"
 
   enable-xt-socket-fallback: "true"
@@ -131,7 +146,9 @@ data:
 
   auto-direct-node-routes: "false"
   enable-bandwidth-manager: "true"
+  enable-local-redirect-policy: "true"
   kube-proxy-replacement:  "probe"
+  kube-proxy-replacement-healthz-bind-address: ""
   enable-health-check-nodeport: "true"
   node-port-bind-protection: "true"
   enable-auto-protect-node-port-range: "true"
@@ -156,12 +173,14 @@ data:
     drop
     tcp
     flow
-    port-distribution
     icmp
     http
   # An additional address for Hubble server to listen to (e.g. ":4244").
   hubble-listen-address: ":4244"
-  hubble-disable-tls: "true"
+  hubble-disable-tls: "false"
+  hubble-tls-cert-file: /var/lib/cilium/tls/hubble/server.crt
+  hubble-tls-key-file: /var/lib/cilium/tls/hubble/server.key
+  hubble-tls-client-ca-files: /var/lib/cilium/tls/hubble/client-ca.crt
   ipam: "cluster-pool"
   cluster-pool-ipv4-cidr: "10.0.0.0/8"
   cluster-pool-ipv4-mask-size: "24"
@@ -181,7 +200,9 @@ data:
     retry-timeout: 
     sort-buffer-len-max: 
     sort-buffer-drain-timeout: 
-    disable-client-tls: true
+    tls-client-cert-file: /var/lib/hubble-relay/tls/client.crt
+    tls-client-key-file: /var/lib/hubble-relay/tls/client.key
+    tls-hubble-server-ca-files: /var/lib/hubble-relay/tls/hubble-server-ca.crt
     disable-server-tls: true
 ---
 # Source: cilium/templates/hubble-ui-configmap.yaml
@@ -346,9 +367,6 @@ rules:
   - ciliumlocalredirectpolicies
   - ciliumlocalredirectpolicies/status
   - ciliumlocalredirectpolicies/finalizers
-  - ciliumclusterwidelocalredirectpolicies
-  - ciliumclusterwidelocalredirectpolicies/status
-  - ciliumclusterwidelocalredirectpolicies/finalizers
   verbs:
   - '*'
 ---
@@ -410,9 +428,6 @@ rules:
   - ciliumlocalredirectpolicies
   - ciliumlocalredirectpolicies/status
   - ciliumlocalredirectpolicies/finalizers
-  - ciliumclusterwidelocalredirectpolicies
-  - ciliumclusterwidelocalredirectpolicies/status
-  - ciliumclusterwidelocalredirectpolicies/finalizers
   verbs:
   - '*'
 - apiGroups:
@@ -442,6 +457,46 @@ rules:
   - create
   - get
   - update
+---
+# Source: cilium/templates/hubble-generate-certs-clusterrole.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hubble-generate-certs
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - hubble-server-certs
+      - hubble-relay-client-certs
+      - hubble-relay-server-certs
+    verbs:
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - hubble-ca-cert
+    verbs:
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - hubble-ca-secret
+    verbs:
+      - get
 ---
 # Source: cilium/templates/hubble-relay-clusterrole.yaml
 kind: ClusterRole
@@ -533,6 +588,20 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: cilium-operator
+  namespace: kube-system
+---
+# Source: cilium/templates/hubble-generate-certs-clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hubble-generate-certs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hubble-generate-certs
+subjects:
+- kind: ServiceAccount
+  name: hubble-generate-certs
   namespace: kube-system
 ---
 # Source: cilium/templates/hubble-relay-clusterrolebinding.yaml
@@ -729,7 +798,7 @@ spec:
               key: custom-cni-conf
               name: cilium-config
               optional: true
-        image: docker.io/cilium/cilium:latest
+        image: quay.io/cilium/cilium:latest
         imagePullPolicy: Always
         lifecycle:
           postStart:
@@ -774,6 +843,9 @@ spec:
           readOnly: true
         - mountPath: /run/xtables.lock
           name: xtables-lock
+        - mountPath: /var/lib/cilium/tls/hubble
+          name: hubble-tls
+          readOnly: true
       hostNetwork: true
       initContainers:
       - command:
@@ -797,7 +869,7 @@ spec:
               key: wait-bpf-mount
               name: cilium-config
               optional: true
-        image: docker.io/cilium/cilium:latest
+        image: quay.io/cilium/cilium:latest
         imagePullPolicy: Always
         name: clean-cilium-state
         securityContext:
@@ -862,6 +934,23 @@ spec:
       - configMap:
           name: cilium-config
         name: cilium-config-path
+      - name: hubble-tls
+        projected:
+          sources:
+          - secret:
+              name: hubble-server-certs
+              items:
+                - key: tls.crt
+                  path: server.crt
+                - key: tls.key
+                  path: server.key
+              optional: true
+          - configMap:
+              name: hubble-ca-cert
+              items:
+                - key: ca.crt
+                  path: client-ca.crt
+              optional: true
 ---
 # Source: cilium/templates/cilium-operator-deployment.yaml
 apiVersion: apps/v1
@@ -876,7 +965,7 @@ spec:
   # We support HA mode only for Kubernetes version > 1.14
   # See docs on ServerCapabilities.LeasesResourceLock in file pkg/k8s/version/version.go
   # for more details.
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       io.cilium/app: operator
@@ -904,7 +993,7 @@ spec:
                 operator: In
                 values:
                 - operator
-            topologyKey: "kubernetes.io/hostname"
+            topologyKey: kubernetes.io/hostname
       containers:
       - args:
         - --config-dir=/tmp/cilium/config-map
@@ -928,7 +1017,7 @@ spec:
               key: debug
               name: cilium-config
               optional: true
-        image: docker.io/cilium/operator-generic:latest
+        image: quay.io/cilium/operator-generic:latest
         imagePullPolicy: Always
         name: cilium-operator
         livenessProbe:
@@ -992,7 +1081,7 @@ spec:
             topologyKey: "kubernetes.io/hostname"
       containers:
         - name: hubble-relay
-          image: docker.io/cilium/hubble-relay:latest
+          image: quay.io/cilium/hubble-relay:latest
           imagePullPolicy: Always
           command:
             - hubble-relay
@@ -1014,6 +1103,9 @@ spec:
           - mountPath: /etc/hubble-relay
             name: config
             readOnly: true
+          - mountPath: /var/lib/hubble-relay/tls
+            name: tls
+            readOnly: true
       restartPolicy: Always
       serviceAccount: hubble-relay
       serviceAccountName: hubble-relay
@@ -1029,6 +1121,21 @@ spec:
           path: /var/run/cilium
           type: Directory
         name: hubble-sock-dir
+      - projected:
+          sources:
+          - secret:
+              name: hubble-relay-client-certs
+              items:
+                - key: tls.crt
+                  path: client.crt
+                - key: tls.key
+                  path: client.key
+          - configMap:
+              name: hubble-ca-cert
+              items:
+                - key: ca.crt
+                  path: hubble-server-ca.crt
+        name: tls
 ---
 # Source: cilium/templates/hubble-ui-deployment.yaml
 kind: Deployment
@@ -1054,7 +1161,7 @@ spec:
       serviceAccountName: hubble-ui
       containers:
         - name: frontend
-          image: "docker.io/cilium/hubble-ui:latest"
+          image: "quay.io/cilium/hubble-ui:latest"
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -1062,7 +1169,7 @@ spec:
           resources:
             {}
         - name: backend
-          image: "docker.io/cilium/hubble-ui-backend:latest"
+          image: "quay.io/cilium/hubble-ui-backend:latest"
           imagePullPolicy: Always
           env:
             - name: EVENTS_SERVER_PORT
@@ -1098,3 +1205,97 @@ spec:
         - name: hubble-ui-envoy-yaml
           configMap:
             name: hubble-ui-envoy
+---
+# Source: cilium/templates/hubble-generate-certs-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hubble-generate-certs
+  namespace: kube-system
+  labels:
+    k8s-app: hubble-generate-certs
+spec:
+  template:
+    metadata:
+      labels:
+        k8s-app: hubble-generate-certs
+    spec:
+      serviceAccount: hubble-generate-certs
+      serviceAccountName: hubble-generate-certs
+      containers:
+        - name: certgen
+          image: quay.io/cilium/certgen:v0.1.3
+          imagePullPolicy: Always
+          command:
+            - "/usr/bin/cilium-certgen"
+          # Because this is executed as a job, we pass the values as command
+          # line args instead of via config map. This allows users to inspect
+          # the values used in past runs by inspecting the completed pod.
+          args:
+            - "--cilium-namespace=kube-system"
+            - "--hubble-ca-reuse-secret=true"
+            - "--hubble-ca-secret-name=hubble-ca-secret"
+            - "--hubble-ca-generate=true"
+            - "--hubble-ca-validity-duration=94608000s"
+            - "--hubble-ca-config-map-create=true"
+            - "--hubble-ca-config-map-name=hubble-ca-cert"
+            - "--hubble-server-cert-generate=true"
+            - "--hubble-server-cert-common-name=*.default.hubble-grpc.cilium.io"
+            - "--hubble-server-cert-validity-duration=94608000s"
+            - "--hubble-server-cert-secret-name=hubble-server-certs"
+            - "--hubble-relay-client-cert-generate=true"
+            - "--hubble-relay-client-cert-validity-duration=94608000s"
+            - "--hubble-relay-client-cert-secret-name=hubble-relay-client-certs"
+            - "--hubble-relay-server-cert-generate=false"
+      hostNetwork: true
+      restartPolicy: OnFailure
+  ttlSecondsAfterFinished: 1800
+---
+# Source: cilium/templates/hubble-generate-certs-cronjob.yaml
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: hubble-generate-certs
+  namespace: kube-system
+  labels:
+    k8s-app: hubble-generate-certs
+spec:
+  schedule: "0 0 1 */4 *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            k8s-app: hubble-generate-certs
+        spec:
+          serviceAccount: hubble-generate-certs
+          serviceAccountName: hubble-generate-certs
+          containers:
+            - name: certgen
+              image: quay.io/cilium/certgen:v0.1.3
+              imagePullPolicy: Always
+              command:
+                - "/usr/bin/cilium-certgen"
+              # Because this is executed as a job, we pass the values as command
+              # line args instead of via config map. This allows users to inspect
+              # the values used in past runs by inspecting the completed pod.
+              args:
+                - "--cilium-namespace=kube-system"
+                - "--hubble-ca-reuse-secret=true"
+                - "--hubble-ca-secret-name=hubble-ca-secret"
+                - "--hubble-ca-generate=true"
+                - "--hubble-ca-validity-duration=94608000s"
+                - "--hubble-ca-config-map-create=true"
+                - "--hubble-ca-config-map-name=hubble-ca-cert"
+                - "--hubble-server-cert-generate=true"
+                - "--hubble-server-cert-common-name=*.default.hubble-grpc.cilium.io"
+                - "--hubble-server-cert-validity-duration=94608000s"
+                - "--hubble-server-cert-secret-name=hubble-server-certs"
+                - "--hubble-relay-client-cert-generate=true"
+                - "--hubble-relay-client-cert-validity-duration=94608000s"
+                - "--hubble-relay-client-cert-secret-name=hubble-relay-client-certs"
+                - "--hubble-relay-server-cert-generate=false"
+          hostNetwork: true
+          restartPolicy: OnFailure
+      ttlSecondsAfterFinished: 1800

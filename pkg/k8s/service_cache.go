@@ -18,8 +18,8 @@ import (
 	"net"
 
 	"github.com/cilium/cilium/pkg/datapath"
-	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
-	slim_discovery_v1beta1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/discovery/v1beta1"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	slim_discovery_v1beta1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1beta1"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -341,6 +341,28 @@ func (s *ServiceCache) DeleteEndpointSlices(epSlice *slim_discovery_v1beta1.Endp
 // FrontendList is the list of all k8s service frontends
 type FrontendList map[string]struct{}
 
+// LooseMatch returns true if the provided frontend is found in the
+// FrontendList. If the frontend has a protocol value set, it only matches a
+// k8s service with a matching protocol. If no protocol is set, any k8s service
+// matching frontend IP and port is considered a match, regardless of protocol.
+func (l FrontendList) LooseMatch(frontend loadbalancer.L3n4Addr) (exists bool) {
+	switch frontend.Protocol {
+	case loadbalancer.NONE:
+		for _, protocol := range loadbalancer.AllProtocols {
+			frontend.Protocol = protocol
+			_, exists = l[frontend.StringWithProtocol()]
+			if exists {
+				return
+			}
+		}
+
+	// If the protocol is set, perform an exact match
+	default:
+		_, exists = l[frontend.StringWithProtocol()]
+	}
+	return
+}
+
 // UniqueServiceFrontends returns all externally scoped services known to
 // the service cache as a map, indexed by the string representation of a
 // loadbalancer.L3n4Addr. This helper is only used in unit tests.
@@ -357,12 +379,12 @@ func (s *ServiceCache) UniqueServiceFrontends() FrontendList {
 				L4Addr: *p,
 				Scope:  loadbalancer.ScopeExternal,
 			}
-			uniqueFrontends[address.String()] = struct{}{}
+			uniqueFrontends[address.StringWithProtocol()] = struct{}{}
 		}
 		for _, nodePortFEs := range svc.NodePorts {
 			for _, fe := range nodePortFEs {
 				if fe.Scope == loadbalancer.ScopeExternal {
-					uniqueFrontends[fe.String()] = struct{}{}
+					uniqueFrontends[fe.StringWithProtocol()] = struct{}{}
 				}
 			}
 		}
@@ -375,7 +397,7 @@ func (s *ServiceCache) UniqueServiceFrontends() FrontendList {
 // all external endpoints if the service is marked as a global service. Also
 // returns a boolean that indicates whether the service is ready to be plumbed,
 // this is true if:
-// IF If ta local endpoints resource is present. Regardless whether the
+// A local endpoints resource is present. Regardless whether the
 //    endpoints resource contains actual backends or not.
 // OR Remote endpoints exist which correlate to the service.
 func (s *ServiceCache) correlateEndpoints(id ServiceID) (*Endpoints, bool) {
@@ -397,10 +419,6 @@ func (s *ServiceCache) correlateEndpoints(id ServiceID) (*Endpoints, bool) {
 			// EndpointSlices so no need to search the endpoints of a particular
 			// EndpointSlice.
 			for clusterName, remoteClusterEndpoints := range externalEndpoints.endpoints {
-				if clusterName == option.Config.ClusterName {
-					continue
-				}
-
 				for ip, e := range remoteClusterEndpoints.Backends {
 					if _, ok := endpoints.Backends[ip]; ok {
 						log.WithFields(logrus.Fields{
@@ -426,17 +444,20 @@ func (s *ServiceCache) correlateEndpoints(id ServiceID) (*Endpoints, bool) {
 // the local service cache. The service endpoints are stored as external endpoints
 // and are correlated on demand with local services via correlateEndpoints().
 func (s *ServiceCache) MergeExternalServiceUpdate(service *serviceStore.ClusterService, swg *lock.StoppableWaitGroup) {
-	id := ServiceID{Name: service.Name, Namespace: service.Namespace}
-	scopedLog := log.WithFields(logrus.Fields{logfields.ServiceName: service.String()})
-
 	// Ignore updates of own cluster
 	if service.Cluster == option.Config.ClusterName {
-		scopedLog.Debug("Not merging external service. Own cluster")
 		return
 	}
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
+	s.mergeServiceUpdateLocked(service, nil, swg)
+}
+
+func (s *ServiceCache) mergeServiceUpdateLocked(service *serviceStore.ClusterService, oldService *Service, swg *lock.StoppableWaitGroup) {
+	id := ServiceID{Name: service.Name, Namespace: service.Namespace}
+	scopedLog := log.WithFields(logrus.Fields{logfields.ServiceName: service.String()})
 
 	externalEndpoints, ok := s.externalEndpoints[id]
 	if !ok {
@@ -463,11 +484,12 @@ func (s *ServiceCache) MergeExternalServiceUpdate(service *serviceStore.ClusterS
 	if ok && svc.Shared && serviceReady {
 		swg.Add()
 		s.Events <- ServiceEvent{
-			Action:    UpdateService,
-			ID:        id,
-			Service:   svc,
-			Endpoints: endpoints,
-			SWG:       swg,
+			Action:     UpdateService,
+			ID:         id,
+			Service:    svc,
+			OldService: oldService,
+			Endpoints:  endpoints,
+			SWG:        swg,
 		}
 	}
 }
@@ -520,6 +542,59 @@ func (s *ServiceCache) MergeExternalServiceDelete(service *serviceStore.ClusterS
 		}
 	} else {
 		scopedLog.Debug("Received delete event for non-existing endpoints")
+	}
+}
+
+// MergeClusterServiceUpdate merges a cluster service of a local cluster into
+// the local service cache. The service endpoints are stored as external endpoints
+// and are correlated on demand with local services via correlateEndpoints().
+// Local service is created and/or updated if needed.
+func (s *ServiceCache) MergeClusterServiceUpdate(service *serviceStore.ClusterService, swg *lock.StoppableWaitGroup) {
+	scopedLog := log.WithFields(logrus.Fields{logfields.ServiceName: service.String()})
+	id := ServiceID{Name: service.Name, Namespace: service.Namespace}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	var oldService *Service
+	svc, ok := s.services[id]
+	if !ok || !svc.EqualsClusterService(service) {
+		oldService = svc
+		svc = ParseClusterService(service)
+		s.services[id] = svc
+		scopedLog.Debugf("Added new service %v", svc)
+	}
+	s.mergeServiceUpdateLocked(service, oldService, swg)
+}
+
+// MergeClusterServiceDelete merges the deletion of a cluster service in a
+// remote cluster into the local service cache, deleting the local service.
+func (s *ServiceCache) MergeClusterServiceDelete(service *serviceStore.ClusterService, swg *lock.StoppableWaitGroup) {
+	scopedLog := log.WithFields(logrus.Fields{logfields.ServiceName: service.String()})
+	id := ServiceID{Name: service.Name, Namespace: service.Namespace}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	externalEndpoints, ok := s.externalEndpoints[id]
+	if ok {
+		scopedLog.Debug("Deleting cluster endpoints")
+		delete(externalEndpoints.endpoints, service.Cluster)
+	}
+
+	svc, ok := s.services[id]
+	endpoints, _ := s.correlateEndpoints(id)
+	delete(s.services, id)
+
+	if ok {
+		swg.Add()
+		s.Events <- ServiceEvent{
+			Action:    DeleteService,
+			ID:        id,
+			Service:   svc,
+			Endpoints: endpoints,
+			SWG:       swg,
+		}
 	}
 }
 

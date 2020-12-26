@@ -31,11 +31,6 @@
 {{- $defaultBpfCtAnyMax = 0 -}}
 {{- end -}}
 
-{{- /* Default values when 1.9 was initially deployed */ -}}
-{{- if semverCompare ">=1.9" (default "1.9" .Values.upgradeCompatibility) -}}
-{{- $defaultBpfTProxy = "true" -}}
-{{- end -}}
-
 {{- $ipam := (coalesce .Values.ipam.mode $defaultIPAM) -}}
 {{- $bpfCtTcpMax := (coalesce .Values.bpf.ctTcpMax $defaultBpfCtTcpMax) -}}
 {{- $bpfCtAnyMax := (coalesce .Values.bpf.ctAnyMax $defaultBpfCtAnyMax) -}}
@@ -78,6 +73,10 @@ data:
 
 {{- if hasKey .Values "conntrackGCInterval" }}
   conntrack-gc-interval: {{ .Values.conntrackGCInterval | quote }}
+{{- end }}
+
+{{- if hasKey .Values "disableEnvoyVersionCheck" }}
+  disable-envoy-version-check: {{ .Values.disableEnvoyVersionCheck | quote }}
 {{- end }}
 
   # Identity allocation mode selects how identities are shared between cilium
@@ -231,6 +230,10 @@ data:
   bpf-map-dynamic-size-ratio: {{ $defaultBpfMapDynamicSizeRatio | quote }}
 {{- end }}
 
+{{- if hasKey .Values.bpf "hostRouting" }}
+  enable-host-legacy-routing: {{ .Values.bpf.hostRouting | quote }}
+{{- end }}
+
 {{- if or $bpfCtTcpMax $bpfCtAnyMax }}
   # bpf-ct-global-*-max specifies the maximum number of connections
   # supported across all endpoints, split by protocol: tcp or other. One pair
@@ -238,8 +241,9 @@ data:
   # use these values for IPv6 connections.
   #
   # If these values are modified, then during the next Cilium startup the
-  # tracking of ongoing connections may be disrupted. This may lead to brief
-  # policy drops or a change in loadbalancing decisions for a connection.
+  # tracking of ongoing connections may be disrupted. As a result, reply
+  # packets may be dropped and the load-balancing decisions for established
+  # connections may change.
   #
   # For users upgrading from Cilium 1.2 or earlier, to minimize disruption
   # during the upgrade process, set bpf-ct-global-tcp-max to 1000000.
@@ -280,9 +284,8 @@ data:
   #
   # If this value is modified, then during the next Cilium startup the restore
   # of existing endpoints and tracking of ongoing connections may be disrupted.
-  # This may lead to policy drops or a change in loadbalancing decisions for a
-  # connection for some time. Endpoints may need to be recreated to restore
-  # connectivity.
+  # As a result, reply packets may be dropped and the load-balancing decisions
+  # for established connections may change.
   #
   # If this option is set to "false" during an upgrade from 1.3 or earlier to
   # 1.4 or later, then it may cause one-time disruptions during the upgrade.
@@ -291,13 +294,6 @@ data:
   # Regular expression matching compatible Istio sidecar istio-proxy
   # container image names
   sidecar-istio-proxy-image: "{{ .Values.proxy.sidecarImageRegex }}"
-
-  # Encapsulation mode for communication between nodes
-  # Possible values:
-  #   - disabled
-  #   - vxlan (default)
-  #   - geneve
-  tunnel: {{ .Values.tunnel }}
 
   # Name of the cluster. Only relevant when building a mesh of clusters.
   cluster-name: {{ .Values.cluster.name }}
@@ -308,12 +304,17 @@ data:
   cluster-id: "{{ .Values.cluster.id }}"
 {{- end }}
 
+  # Encapsulation mode for communication between nodes
+  # Possible values:
+  #   - disabled
+  #   - vxlan (default)
+  #   - geneve
 {{- if .Values.gke.enabled }}
-
-  ipam: "kubernetes"
   tunnel: "disabled"
   enable-endpoint-routes: "true"
   enable-local-node-route: "false"
+{{- else }}
+  tunnel: {{ .Values.tunnel }}
 {{- end }}
 
 {{- if .Values.eni }}
@@ -325,6 +326,9 @@ data:
   enable-endpoint-routes: "true"
   auto-create-cilium-node-resource: "true"
   enable-local-node-route: "false"
+{{- if .Values.azure.userAssignedIdentityID }}
+  azure-user-assigned-identity-id: {{ .Values.azure.userAssignedIdentityID | quote }}
+{{- end }}
 {{- end }}
 
 {{- if .Values.flannel.enabled }}
@@ -340,7 +344,7 @@ data:
   flannel-uninstall-on-exit: "{{ .Values.flannel.uninstallOnExit}}"
 {{- end }}
 
-{{- if .Values.l7Proxy }}
+{{- if hasKey .Values "l7Proxy" }}
   # Enables L7 proxy for L7 policy enforcement and visibility
   enable-l7-proxy: {{ .Values.l7Proxy | quote }}
 {{- end }}
@@ -371,7 +375,9 @@ data:
 {{- end }}
 {{- end }}
 
-  masquerade: {{ .Values.masquerade | quote }}
+  enable-ipv4-masquerade: {{ .Values.enableIPv4Masquerade | quote }}
+  enable-ipv6-masquerade: {{ .Values.enableIPv6Masquerade | quote }}
+
 {{- if hasKey .Values.bpf "masquerade" }}
   enable-bpf-masquerade: {{ .Values.bpf.masquerade | quote }}
 {{- else if eq $defaultBpfMasquerade "true" }}
@@ -415,6 +421,10 @@ data:
   auto-direct-node-routes: {{ .Values.autoDirectNodeRoutes | quote }}
   enable-bandwidth-manager: {{ .Values.bandwidthManager | quote }}
 
+{{- if hasKey .Values "localRedirectPolicy" }}
+  enable-local-redirect-policy: {{ .Values.localRedirectPolicy | quote }}
+{{- end }}
+
 {{- if hasKey .Values "nativeRoutingCIDR" }}
   native-routing-cidr: {{ .Values.nativeRoutingCIDR }}
 {{- end }}
@@ -437,6 +447,9 @@ data:
 
 {{- if hasKey .Values "kubeProxyReplacement" }}
   kube-proxy-replacement:  {{ .Values.kubeProxyReplacement | quote }}
+{{- if ne .Values.kubeProxyReplacement "disabled" }}
+  kube-proxy-replacement-healthz-bind-address: {{ default "" .Values.kubeProxyReplacementHealthzBindAddr | quote}}
+{{- end }}
 {{- end }}
 {{- if hasKey .Values "hostServices" }}
 {{- if .Values.hostServices.enabled }}
@@ -466,20 +479,22 @@ data:
 {{- if hasKey .Values.nodePort "directRoutingDevice" }}
   direct-routing-device: {{ .Values.nodePort.directRoutingDevice | quote }}
 {{- end }}
-{{- if hasKey .Values.nodePort "mode" }}
-  node-port-mode: {{ .Values.nodePort.mode | quote }}
-{{- end }}
-{{- if hasKey .Values.nodePort "algorithm" }}
-  node-port-algorithm: {{ .Values.nodePort.algorithm | quote }}
-{{- end }}
 {{- if .Values.nodePort.enableHealthCheck }}
   enable-health-check-nodeport: {{ .Values.nodePort.enableHealthCheck | quote}}
 {{- end }}
-{{- if hasKey .Values.nodePort "acceleration" }}
-  node-port-acceleration: {{ .Values.nodePort.acceleration | quote }}
-{{- end }}
   node-port-bind-protection: {{ .Values.nodePort.bindProtection | quote }}
   enable-auto-protect-node-port-range: {{ .Values.nodePort.autoProtectPortRange | quote }}
+{{- end }}
+{{- if hasKey .Values "loadBalancer" }}
+{{- if hasKey .Values.loadBalancer "mode" }}
+  node-port-mode: {{ .Values.loadBalancer.mode | quote }}
+{{- end }}
+{{- if hasKey .Values.loadBalancer "algorithm" }}
+  bpf-lb-algorithm: {{ .Values.loadBalancer.algorithm | quote }}
+{{- end }}
+{{- if hasKey .Values.loadBalancer "acceleration" }}
+  node-port-acceleration: {{ .Values.loadBalancer.acceleration | quote }}
+{{- end }}
 {{- end }}
 {{- if hasKey .Values.maglev "tableSize" }}
   bpf-lb-maglev-table-size: {{ .Values.maglev.tableSize | quote}}
@@ -503,7 +518,7 @@ data:
   log-system-load: {{ .Values.logSystemLoad | quote }}
 {{- end }}
 {{- if .Values.logOptions }}
-  log-opt: {{ toYaml .Values.logOptions | nindent 4 }}
+  log-opt: {{ .Values.logOptions | toJson | quote }}
 {{- end }}
 {{- if and .Values.sockops .Values.sockops.enabled }}
   sockops-enable: {{ .Values.sockops.enabled | quote }}
@@ -532,7 +547,7 @@ data:
 {{- if hasKey .Values "healthChecking" }}
   enable-health-checking: {{ .Values.healthChecking | quote }}
 {{- end }}
-{{- if or .Values.wellKnownIdentities.enabled .Values.etcd.managed }}
+{{- if .Values.etcd.managed }}
   enable-well-known-identities: "true"
 {{- else }}
   enable-well-known-identities: "false"
@@ -562,8 +577,12 @@ data:
   hubble-event-queue-size: {{ .Values.hubble.eventQueueSize | quote }}
 {{- end }}
 {{- if hasKey .Values.hubble "flowBufferSize" }}
-  # Size of the buffer to store recent flows.
+  # DEPRECATED: this block should be removed in 1.11
   hubble-flow-buffer-size: {{ .Values.hubble.flowBufferSize | quote }}
+{{- end }}
+{{- if hasKey .Values.hubble "eventBufferCapacity" }}
+  # Capacity of the buffer to store recent events.
+  hubble-event-buffer-capacity: {{ .Values.hubble.eventBufferCapacity | quote }}
 {{- end }}
 {{- if .Values.hubble.metrics.enabled }}
   # Address to expose Hubble metrics (e.g. ":7070"). Metrics server will be disabled if this
@@ -593,9 +612,8 @@ data:
   # A space separated list of iptables chains to disable when installing feeder rules.
   disable-iptables-feeder-rules: {{ .Values.disableIptablesFeederRules | join " " | quote }}
 {{- end }}
-{{- if ne $ipam "hostscope" }}
   ipam: {{ $ipam | quote }}
-{{- end }}
+
 {{- if eq $ipam "cluster-pool" }}
 {{- if .Values.ipv4.enabled }}
   cluster-pool-ipv4-cidr: {{ .Values.ipam.operator.clusterPoolIPv4PodCIDR | quote }}
@@ -626,5 +644,9 @@ data:
 {{- if hasKey .Values.k8s "serviceProxyName" }}
   # Configure service proxy name for Cilium.
   k8s-service-proxy-name: {{ .Values.k8s.serviceProxyName | quote }}
+{{- end }}
+
+{{- if .Values.extraConfig }}
+{{ toYaml .Values.extraConfig | indent 2 }}
 {{- end }}
 {{- end }}

@@ -53,9 +53,6 @@ type ServiceKey interface {
 	// Get frontend port
 	GetPort() uint16
 
-	// Get protocol
-	GetProtocol() uint8
-
 	// Returns a RevNatValue matching a ServiceKey
 	RevNatValue() RevNatValue
 
@@ -64,6 +61,9 @@ type ServiceKey interface {
 
 	// ToNetwork converts fields to network byte order.
 	ToNetwork() ServiceKey
+
+	// ToHost converts fields to host byte order.
+	ToHost() ServiceKey
 }
 
 // ServiceValue is the interface describing protocol independent value for services map v2.
@@ -102,6 +102,9 @@ type ServiceValue interface {
 
 	// Convert fields to network byte order.
 	ToNetwork() ServiceValue
+
+	// ToHost converts fields to host byte order.
+	ToHost() ServiceValue
 }
 
 // BackendKey is the interface describing protocol independent backend key.
@@ -128,11 +131,11 @@ type BackendValue interface {
 	// Get backend port
 	GetPort() uint16
 
-	// Get backend protocol
-	GetProtocol() uint8
-
 	// Convert fields to network byte order.
 	ToNetwork() BackendValue
+
+	// ToHost converts fields to host byte order.
+	ToHost() BackendValue
 }
 
 // Backend is the interface describing protocol independent backend used by services v2.
@@ -158,6 +161,9 @@ type RevNatKey interface {
 
 	// Returns the key value
 	GetKey() uint16
+
+	// ToHost converts fields to host byte order.
+	ToHost() RevNatKey
 }
 
 type RevNatValue interface {
@@ -165,6 +171,9 @@ type RevNatValue interface {
 
 	// ToNetwork converts fields to network byte order.
 	ToNetwork() RevNatValue
+
+	// ToHost converts fields to host byte order.
+	ToHost() RevNatValue
 }
 
 // BackendIDByServiceIDSet is the type of a set for checking whether a backend
@@ -174,8 +183,7 @@ type BackendIDByServiceIDSet map[uint16]map[uint16]struct{} // svc ID => backend
 type SourceRangeSetByServiceID map[uint16][]*cidr.CIDR // svc ID => src range CIDRs
 
 func svcFrontend(svcKey ServiceKey, svcValue ServiceValue) *loadbalancer.L3n4AddrID {
-	p := loadbalancer.NewL4TypeFromNumber(svcKey.GetProtocol())
-	feL3n4Addr := loadbalancer.NewL3n4Addr(p, svcKey.GetAddress(), svcKey.GetPort(), svcKey.GetScope())
+	feL3n4Addr := loadbalancer.NewL3n4Addr(loadbalancer.NONE, svcKey.GetAddress(), svcKey.GetPort(), svcKey.GetScope())
 	feL3n4AddrID := &loadbalancer.L3n4AddrID{
 		L3n4Addr: *feL3n4Addr,
 		ID:       loadbalancer.ID(svcValue.GetRevNat()),
@@ -186,7 +194,7 @@ func svcFrontend(svcKey ServiceKey, svcValue ServiceValue) *loadbalancer.L3n4Add
 func svcBackend(backendID loadbalancer.BackendID, backend BackendValue) *loadbalancer.Backend {
 	beIP := backend.GetAddress()
 	bePort := backend.GetPort()
-	p := loadbalancer.NewL4TypeFromNumber(backend.GetProtocol())
-	beBackend := loadbalancer.NewBackend(backendID, p, beIP, bePort)
+	beProto := loadbalancer.NONE
+	beBackend := loadbalancer.NewBackend(backendID, beProto, beIP, bePort)
 	return beBackend
 }

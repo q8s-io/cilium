@@ -25,7 +25,7 @@ spec:
 {{- end }}
       hostPID: true
       hostNetwork: true
-{{- if or (and (eq .Release.Namespace "kube-system") (gt .Capabilities.KubeVersion.Minor "10")) (ge .Capabilities.KubeVersion.Minor "17") (gt .Capabilities.KubeVersion.Major "1")}}
+{{- if and (or (and (eq .Release.Namespace "kube-system") (gt .Capabilities.KubeVersion.Minor "10")) (ge .Capabilities.KubeVersion.Minor "17") (gt .Capabilities.KubeVersion.Major "1")) .Values.enableCriticalPriorityClass }}
       priorityClassName: system-node-critical
 {{- end }}
 {{- if .Values.imagePullSecrets }}
@@ -162,7 +162,7 @@ spec:
               ip -4 a
               ip -6 a
 
-{{- if or .Values.expectAzureVnet .Values.azure.enabled }}
+{{- if or .Values.nodeinit.expectAzureVnet .Values.azure.enabled }}
               # Azure specific: Transparent bridge mode is required in order
               # for proxy-redirection to work
               until [ -f /var/run/azure-vnet.json ]; do

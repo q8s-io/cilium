@@ -54,13 +54,13 @@ this attribute can also be set via helm option ``--set labels=<values>``.
     ...
       kube-proxy-replacement: partial
       labels:  "k8s:io.kubernetes.pod.namespace k8s:k8s-app k8s:app k8s:name"
-      masquerade: "true"
+      enable-ipv4-masquerade: "true"
       monitor-aggregation: medium
     ...
 
 
-Upon defining a custom list of labels in the ConfigMap, Cilium will override
-the default list of labels with the list provided. After saving the ConfigMap,
+Upon defining a custom list of labels in the ConfigMap, Cilium add the provided
+list of labels to the default list of labels. After saving the ConfigMap,
 restart the Cilium Agents to pickup the new labels setting.
 
 .. code-block:: bash
@@ -89,10 +89,23 @@ will be used to evaluate Cilium identities:
 The above configuration would only include the following labels when evaluating
 Cilium identities:
 
-- io.kubernetes.pod.namespace=*
-- k8s-app=*
-- app=*
-- name=*
+- io.kubernetes.pod.namespace*=.*
+- k8s-app*=*
+- app*=*
+- name*=*
+
+Labels with the same prefix as defined in the configuration will also be
+considered. This lists some examples of labels that would also be evaluated for
+Cilium identities:
+
+- k8s-app-team*=*
+- app-production*=*
+- name-defined*=*
+
+When a single "inclusive label" is added to the filter, all labels not defined
+in the default list will be excluded. For example, pods running with the
+security labels ``team=team-1, env=prod`` will have the label ``env=prod``
+ignored as soon Cilium is started with the filter ``k8s:team``.
 
 Excluding Labels
 ----------------

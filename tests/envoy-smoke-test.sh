@@ -63,13 +63,14 @@ function proxy_init {
   create_cilium_docker_network
 
   if [ -z `docker ps -q -f name=^/server1$` ] ; then
-      docker run -dt --net=$TEST_NET --name server1 -l $SERVER_LABEL cilium/demo-httpd
+      docker run -dt --net=cilium --name server1 -l $SERVER_LABEL -v "$dir/testsite":/usr/local/apache2/htdocs/ httpd
   fi
   if [ -z `docker ps -q -f name=^/server2$` ] ; then
-      docker run -dt --net=$TEST_NET --name server2 -l $SERVER_LABEL cilium/demo-httpd
+      docker run -dt --net=cilium --name server2 -l $SERVER_LABEL -v "$dir/testsite":/usr/local/apache2/htdocs/ httpd
   fi
   if [ -z `docker ps -q -f name=^/client$` ] ; then
-      docker run -dt --net=cilium --name client -l id.client tgraf/netperf
+      # use an unused loopback address on a reserved non-listening port with large retry timeout to make this pause "forever"
+      docker run -dt --net=cilium --name client -l id.client curlimages/curl -s --retry-connrefused --retry-delay 1000000 --retry 5 127.242.139.58:967
   fi
   
   SERVER1_IP=$(docker inspect --format '{{ .NetworkSettings.Networks.cilium.GlobalIPv6Address }}' server1)
@@ -94,10 +95,29 @@ function proxy_init {
   log "finished proxy_init"
 }
 
-function policy_single_egress {
+# Dummy policy to keep the containers in policy enforcement mode all the time
+function policy_base {
   cilium policy delete --all
   cat <<EOF | policy_import_and_wait -
 [{
+    "labels": [{"key": "policy", "value": "enforced"}],
+    "endpointSelector": {"matchLabels":{}},
+    "ingress": [{}],
+    "egress": [{}]
+},{
+    "labels": [{"key": "policy", "value": "test"}],
+    "endpointSelector": {"matchLabels":{}},
+    "ingress": [{}],
+    "egress": [{}]
+}]
+EOF
+}
+
+function policy_single_egress {
+  cilium policy delete policy=test
+  cat <<EOF | policy_import_and_wait -
+[{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.server":""}},
     "ingress": [{
         "fromEndpoints": [
@@ -106,6 +126,7 @@ function policy_single_egress {
 	]
     }]
 },{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.client":""}},
     "egress": [{
 	"toPorts": [{
@@ -123,9 +144,10 @@ EOF
 }
 
 function policy_many_egress {
-  cilium policy delete --all
+  cilium policy delete policy=test
   cat <<EOF | policy_import_and_wait -
 [{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.server":""}},
     "ingress": [{
         "fromEndpoints": [
@@ -134,6 +156,7 @@ function policy_many_egress {
 	]
     }]
 },{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.client":""}},
     "egress": [{
         "toEndpoints": [{"matchLabels":{"id.server":""}}],
@@ -175,9 +198,10 @@ EOF
 }
 
 function policy_single_ingress {
-  cilium policy delete --all
+  cilium policy delete policy=test
   cat <<EOF | policy_import_and_wait -
 [{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.server":""}},
     "ingress": [{
         "fromEndpoints": [
@@ -194,14 +218,23 @@ function policy_single_ingress {
 	    }
 	}]
     }]
+},{
+    "labels": [{"key": "policy", "value": "test"}],
+    "endpointSelector": {"matchLabels":{"id.client":""}},
+    "egress": [{
+	"toPorts": [{
+	    "ports": [{"port": "80", "protocol": "tcp"}]
+	}]
+    }]
 }]
 EOF
 }
 
 function policy_many_ingress {
-  cilium policy delete --all
+  cilium policy delete policy=test
   cat <<EOF | policy_import_and_wait -
 [{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.server":""}},
     "ingress": [{
         "fromEndpoints": [
@@ -219,14 +252,23 @@ function policy_many_ingress {
 	    }
 	}]
     }]
+},{
+    "labels": [{"key": "policy", "value": "test"}],
+    "endpointSelector": {"matchLabels":{"id.client":""}},
+    "egress": [{
+	"toPorts": [{
+	    "ports": [{"port": "80", "protocol": "tcp"}]
+	}]
+    }]
 }]
 EOF
 }
 
 function policy_egress_and_ingress {
-  cilium policy delete --all
+  cilium policy delete policy=test
   cat <<EOF | policy_import_and_wait -
 [{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.server":""}},
     "ingress": [{
         "fromEndpoints": [
@@ -234,6 +276,7 @@ function policy_egress_and_ingress {
 	]
     }]
 },{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.client":""}},
     "egress": [{
 	"toPorts": [{
@@ -247,6 +290,7 @@ function policy_egress_and_ingress {
 	}]
     }]
 },{
+    "labels": [{"key": "policy", "value": "test"}],
     "endpointSelector": {"matchLabels":{"id.server":""}},
     "ingress": [{
 	"toPorts": [{
@@ -270,25 +314,25 @@ function proxy_test {
   monitor_clear
 
   log "trying to reach server IPv4 at http://$SERVER_IP4:80/public from client (expected: 200)"
-  RETURN=$(docker exec -i client bash -c "curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://$SERVER_IP4:80/public")
+  RETURN=$(docker exec -i client curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://$SERVER_IP4:80/public)
   if [[ "${RETURN//$'\n'}" != "200" ]]; then
     abort "GET /public, unexpected return ${RETURN//$'\n'} != 200"
   fi
 
   log "trying to reach server IPv6 at http://[$SERVER_IP]:80/public from client (expected: 200)"
-  RETURN=$(docker exec -i client bash -c "curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://[$SERVER_IP]:80/public")
+  RETURN=$(docker exec -i client curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://[$SERVER_IP]:80/public)
   if [[ "${RETURN//$'\n'}" != "200" ]]; then
     abort "GET /public, unexpected return ${RETURN//$'\n'} != 200"
   fi
 
   log "trying to reach server IPv4 at http://$SERVER_IP4:80/private from client (expected: 403)"
-  RETURN=$(docker exec -i client bash -c "curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://$SERVER_IP4:80/private")
+  RETURN=$(docker exec -i client curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://$SERVER_IP4:80/private)
   if [[ "${RETURN//$'\n'}" != "403" ]]; then
     abort "GET /private, unexpected return ${RETURN//$'\n'} != 403"
   fi
 
   log "trying to reach server IPv6 at http://[$SERVER_IP]:80/private from client (expected: 403)"
-  RETURN=$(docker exec -i client bash -c "curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://[$SERVER_IP]:80/private")
+  RETURN=$(docker exec -i client curl -s --output /dev/stderr -w '%{http_code}' --connect-timeout 10 -XGET http://[$SERVER_IP]:80/private)
   if [[ "${RETURN//$'\n'}" != "403" ]]; then
     abort "GET /private, unexpected return ${RETURN//$'\n'} != 403"
   fi
@@ -297,6 +341,7 @@ function proxy_test {
 }
 
 proxy_init
+policy_base
 for state in "false" "true"; do
   cilium config ConntrackLocal=$state
 

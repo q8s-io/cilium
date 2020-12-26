@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cilium/cilium/pkg/versioncheck"
 	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
 
@@ -58,6 +59,17 @@ var _ = Describe("K8sUpdates", func() {
 	)
 
 	BeforeAll(func() {
+		canRun, err := helpers.CanRunK8sVersion(helpers.CiliumStableVersion, helpers.GetCurrentK8SEnv())
+		ExpectWithOffset(1, err).To(BeNil(), "Unable to get k8s constraints for %s", helpers.CiliumStableVersion)
+		if !canRun {
+			Skip(fmt.Sprintf(
+				"Cilium %q is not supported in K8s %q. Skipping upgrade/downgrade tests.",
+				helpers.CiliumStableVersion, helpers.GetCurrentK8SEnv()))
+			return
+		}
+
+		SkipIfIntegration(helpers.CIIntegrationFlannel)
+
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
 
 		demoPath = helpers.ManifestGet(kubectl.BasePath(), "demo.yaml")
@@ -106,7 +118,7 @@ var _ = Describe("K8sUpdates", func() {
 		ExpectAllPodsTerminated(kubectl)
 	})
 
-	SkipItIf(helpers.SkipGKEQuarantined, "Tests upgrade and downgrade from a Cilium stable image to master", func() {
+	It("Tests upgrade and downgrade from a Cilium stable image to master", func() {
 		var assertUpgradeSuccessful func()
 		assertUpgradeSuccessful, cleanupCallback =
 			InstallAndValidateCiliumUpgrades(
@@ -123,15 +135,8 @@ var _ = Describe("K8sUpdates", func() {
 func removeCilium(kubectl *helpers.Kubectl) {
 	_ = kubectl.ExecMiddle("helm delete cilium-preflight --namespace=" + helpers.CiliumNamespace)
 	_ = kubectl.ExecMiddle("helm delete cilium --namespace=" + helpers.CiliumNamespace)
-	_ = kubectl.ExecMiddle(fmt.Sprintf("kubectl delete configmap --namespace=%s cilium-config hubble-ca-cert hubble-relay-config", helpers.CiliumNamespace))
-	_ = kubectl.ExecMiddle(fmt.Sprintf("kubectl delete serviceaccount --namespace=%s cilium cilium-operator hubble-relay", helpers.CiliumNamespace))
-	_ = kubectl.ExecMiddle("kubectl delete clusterrole cilium cilium-operator hubble-relay")
-	_ = kubectl.ExecMiddle("kubectl delete clusterrolebinding cilium cilium-operator hubble-relay")
-	_ = kubectl.ExecMiddle(fmt.Sprintf("kubectl delete daemonset --namespace=%s cilium", helpers.CiliumNamespace))
-	_ = kubectl.ExecMiddle(fmt.Sprintf("kubectl delete deployment --namespace=%s cilium-operator hubble-relay", helpers.CiliumNamespace))
-	_ = kubectl.ExecMiddle(fmt.Sprintf("kubectl delete daemonset --namespace=%s cilium-node-init", helpers.CiliumNamespace))
-	_ = kubectl.ExecMiddle(fmt.Sprintf("kubectl delete secret --namespace=%s hubble-server-certs hubble-relay-client-certs", helpers.CiliumNamespace))
 
+	kubectl.CleanupCiliumComponents()
 	ExpectAllPodsTerminated(kubectl)
 }
 
@@ -143,8 +148,8 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 	var (
 		privateIface string // only used when running w/o kube-proxy
 		err          error
-		apps         = []string{helpers.App1, helpers.App2, helpers.App3}
-		app1Service  = "app1-service"
+
+		timeout = 5 * time.Minute
 	)
 
 	canRun, err := helpers.CanRunK8sVersion(oldImageVersion, helpers.GetCurrentK8SEnv())
@@ -162,6 +167,9 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 		privateIface, err = kubectl.GetPrivateIface()
 		ExpectWithOffset(1, err).To(BeNil(), "Unable to determine private iface")
 	}
+
+	apps := []string{helpers.App1, helpers.App2, helpers.App3}
+	app1Service := "app1-service"
 
 	cleanupCiliumState := func(helmPath, chartVersion, imageName, imageTag, registry string) {
 		removeCilium(kubectl)
@@ -205,8 +213,7 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			)
 		}, time.Second*30, time.Second*1).Should(helpers.CMDSuccess(), fmt.Sprintf("Cilium clean state %q was not able to be deployed", chartVersion))
 
-		err = kubectl.WaitForCiliumReadiness()
-		ExpectWithOffset(1, err).To(BeNil(), "Cilium %q did not become ready in time", chartVersion)
+		kubectl.WaitForCiliumReadiness(1, fmt.Sprintf("Cilium %q did not become ready in time", chartVersion))
 		err = kubectl.WaitForCiliumInitContainerToFinish()
 		ExpectWithOffset(1, err).To(BeNil(), "Cilium %q was not able to be clean up environment", chartVersion)
 		cmd := kubectl.ExecMiddle("helm delete cilium --namespace=" + helpers.CiliumNamespace)
@@ -254,7 +261,7 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 		cleanupCiliumState(filepath.Join(kubectl.BasePath(), helpers.HelmTemplate), newHelmChartVersion, "", newImageVersion, "")
 
 		By("Cleaning Cilium state (%s)", oldImageVersion)
-		cleanupCiliumState("cilium/cilium", oldHelmChartVersion, "docker.io/cilium/cilium", oldImageVersion, "")
+		cleanupCiliumState("cilium/cilium", oldHelmChartVersion, "quay.io/cilium/cilium", oldImageVersion, "")
 
 		By("Deploying Cilium %s", oldHelmChartVersion)
 
@@ -262,9 +269,9 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			"image.tag":                     oldImageVersion,
 			"operator.image.tag":            oldImageVersion,
 			"hubble.relay.image.tag":        oldImageVersion,
-			"image.repository":              "docker.io/cilium/cilium",
-			"operator.image.repository":     "docker.io/cilium/operator",
-			"hubble.relay.image.repository": "docker.io/cilium/hubble-relay",
+			"image.repository":              "quay.io/cilium/cilium",
+			"operator.image.repository":     "quay.io/cilium/operator",
+			"hubble.relay.image.repository": "quay.io/cilium/hubble-relay",
 		}
 		if helpers.RunsWithoutKubeProxy() || helpers.RunsOn419Kernel() {
 			switch oldHelmChartVersion {
@@ -290,8 +297,6 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 				helpers.CiliumNamespace,
 				opts)
 		}, time.Second*30, time.Second*1).Should(helpers.CMDSuccess(), fmt.Sprintf("Cilium %q was not able to be deployed", oldHelmChartVersion))
-		unsetFn := helpers.SetRunningCiliumVersion(oldImageVersion)
-		defer unsetFn()
 
 		// Cilium is only ready if kvstore is ready, the kvstore is ready if
 		// kube-dns is running.
@@ -371,7 +376,7 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			if lastCount == -1 {
 				lastCount = currentCount
 			}
-			ExpectWithOffset(1, lastCount).Should(BeIdenticalTo(currentCount),
+			Expect(lastCount).Should(BeIdenticalTo(currentCount),
 				"migrate-svc restart count values do not match")
 		}
 
@@ -381,23 +386,23 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 		ExpectWithOffset(1, res).To(helpers.CMDSuccess(), "cannot apply dempo application")
 
 		err = kubectl.WaitforPods(helpers.DefaultNamespace, "-l zgroup=testapp", timeout)
-		ExpectWithOffset(1, err).Should(BeNil(), "Test pods are not ready after timeout")
+		Expect(err).Should(BeNil(), "Test pods are not ready after timeout")
 
 		_, err = kubectl.CiliumPolicyAction(
 			helpers.DefaultNamespace, l7Policy, helpers.KubectlApply, timeout)
-		ExpectWithOffset(1, err).Should(BeNil(), "cannot import l7 policy: %v", l7Policy)
+		Expect(err).Should(BeNil(), "cannot import l7 policy: %v", l7Policy)
 
 		By("Creating service and clients for migration")
 
 		res = kubectl.ApplyDefault(migrateSVCServer)
 		ExpectWithOffset(1, res).To(helpers.CMDSuccess(), "cannot apply migrate-svc-server")
 		err = kubectl.WaitforPods(helpers.DefaultNamespace, "-l app=migrate-svc-server", timeout)
-		ExpectWithOffset(1, err).Should(BeNil(), "migrate-svc-server pods are not ready after timeout")
+		Expect(err).Should(BeNil(), "migrate-svc-server pods are not ready after timeout")
 
 		res = kubectl.ApplyDefault(migrateSVCClient)
 		ExpectWithOffset(1, res).To(helpers.CMDSuccess(), "cannot apply migrate-svc-client")
 		err = kubectl.WaitforPods(helpers.DefaultNamespace, "-l app=migrate-svc-client", timeout)
-		ExpectWithOffset(1, err).Should(BeNil(), "migrate-svc-client pods are not ready after timeout")
+		Expect(err).Should(BeNil(), "migrate-svc-client pods are not ready after timeout")
 
 		validateEndpointsConnection()
 		checkNoInteruptsInSVCFlows()
@@ -429,11 +434,16 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 
 		opts = map[string]string{
 			"preflight.enabled":   "true ",
-			"agent.enabled":       "false ",
 			"config.enabled":      "false ",
 			"operator.enabled":    "false ",
 			"preflight.image.tag": newImageVersion,
 			"nodeinit.enabled":    "false",
+		}
+		hasNewHelmValues := versioncheck.MustCompile(">=1.8.90")
+		if hasNewHelmValues(versioncheck.MustVersion(newHelmChartVersion)) {
+			opts["agent"] = "false "
+		} else {
+			opts["agent.enabled"] = "false "
 		}
 		if helpers.RunsWithoutKubeProxy() || helpers.RunsOn419Kernel() {
 			switch oldHelmChartVersion {
@@ -464,8 +474,7 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 		cmd := kubectl.ExecMiddle("helm delete cilium-preflight --namespace=" + helpers.CiliumNamespace)
 		ExpectWithOffset(1, cmd).To(helpers.CMDSuccess(), "Unable to delete preflight")
 
-		err = kubectl.WaitForCiliumReadiness()
-		ExpectWithOffset(1, err).Should(BeNil(), "Cilium is not ready after timeout")
+		kubectl.WaitForCiliumReadiness(1, "Cilium is not ready after timeout")
 		// Need to run using the kvstore-based allocator because upgrading from
 		// kvstore-based allocator to CRD-based allocator is not currently
 		// supported at this time.
@@ -502,7 +511,6 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 				helpers.CiliumNamespace,
 				opts)
 		}, time.Second*30, time.Second*1).Should(helpers.CMDSuccess(), fmt.Sprintf("Cilium %q was not able to be deployed", newHelmChartVersion))
-		helpers.SetRunningCiliumVersion(newImageVersion)
 
 		By("Validating pods have the right image version upgraded")
 		err = helpers.WithTimeout(
@@ -537,7 +545,6 @@ func InstallAndValidateCiliumUpgrades(kubectl *helpers.Kubectl, oldHelmChartVers
 			"Cilium Pods are not updating correctly",
 			&helpers.TimeoutConfig{Timeout: timeout})
 		ExpectWithOffset(1, err).To(BeNil(), "Pods are not updating")
-		helpers.SetRunningCiliumVersion(oldImageVersion)
 
 		err = kubectl.WaitforPods(
 			helpers.CiliumNamespace, "-l k8s-app=cilium", timeout)

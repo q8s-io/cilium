@@ -62,6 +62,11 @@ Reference steps for the template
 #. Update the ``cilium_version`` and ``cilium_tag`` variables in
    ``examples/getting-started/Vagrantfile``
 
+#. Set the right version for the ``CustomResourceDefinitionSchemaVersion`` in
+   the ``pkg/k8s/client`` by following these instructions:
+
+   Run ``./Documentation/check-crd-compat-table.sh vX.Y``
+
 #. Add all modified files using ``git add`` and create a commit with the
    title ``Prepare for release v1.0.3``.
 
@@ -155,14 +160,21 @@ Reference steps for the template
 
 #. Update the ``stable`` tags for ``cilium``, ``cilium-operator``,
    ``cilium-operator-aws``, ``cilium-operator-azure``,
-   ``cilium-operator-generic``, ``cilium-docker-plugin`` and ``hubble-relay``
-   on DockerHub, for the latest version of Cilium. For example, if the latest
-   version is ``1.8``, then for all patch releases on the ``1.8`` line, this
-   step should be performed. Once ``1.9`` is out for example, then this is no
-   longer required for ``1.8``.
+   ``cilium-operator-generic``, ``cilium-docker-plugin``, ``hubble-relay`` and
+   ``clustermesh-apiserver`` on DockerHub, for the latest version of Cilium.
+   For example, if the latest version is ``1.8``, then for all patch releases
+   on the ``1.8`` line, this step should be performed. Once ``1.9`` is out for
+   example, then this is no longer required for ``1.8`` or earlier releases.
 
-   **Note**, the DockerHub UI will not allow you to modify the ``stable`` tag
-   directly. You will need to delete it, and then create a new, updated one.
+   ::
+
+       contrib/release/bump-docker-stable.sh X.Y.Z
+
+#. Check if all docker images are available before announcing the release:
+
+   ::
+
+      make -C install/kubernetes/ check-docker-images
 
 #. Update the following external tools and guides to point to the released
    Cilium version. This step is only required on a new minor release like going

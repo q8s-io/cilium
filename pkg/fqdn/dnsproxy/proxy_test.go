@@ -193,7 +193,7 @@ func (s *DNSProxyTestSuite) SetUpTest(c *C) {
 	s.dnsServer = setupServer(c)
 	c.Assert(s.dnsServer, Not(IsNil), Commentf("unable to setup DNS server"))
 
-	proxy, err := StartDNSProxy("", 0, true, // any address, any port, enable compression
+	proxy, err := StartDNSProxy("", 0, true, 1000, // any address, any port, enable compression, max 1000 restore IPs
 		// LookupEPByIP
 		func(ip net.IP) (*endpoint.Endpoint, error) {
 			if s.restoring {
@@ -660,6 +660,28 @@ func (s *DNSProxyTestSuite) TestFullPathDependence(c *C) {
 	}
 	restored3 := s.proxy.GetRules(uint16(epID3)).Sort()
 	c.Assert(restored3, checker.DeepEquals, expected3)
+
+	// Test with limited set of allowed IPs
+	oldUsed := s.proxy.usedServers
+	s.proxy.usedServers = map[string]struct{}{"127.0.0.2": {}}
+
+	expected1b := restore.DNSRules{
+		53: restore.IPRules{{
+			IPs: map[string]struct{}{},
+			Re:  restore.RuleRegex{Regexp: s.proxy.allowed[epID1][53][cachedDstID1Selector]},
+		}, {
+			IPs: map[string]struct{}{"127.0.0.2": {}},
+			Re:  restore.RuleRegex{Regexp: s.proxy.allowed[epID1][53][cachedDstID2Selector]},
+		}}.Sort(),
+		54: restore.IPRules{{
+			Re: restore.RuleRegex{Regexp: s.proxy.allowed[epID1][54][cachedWildcardSelector]},
+		}},
+	}
+	restored1b := s.proxy.GetRules(uint16(epID1)).Sort()
+	c.Assert(restored1b, checker.DeepEquals, expected1b)
+
+	// unlimited again
+	s.proxy.usedServers = oldUsed
 
 	s.proxy.UpdateAllowed(epID1, 53, nil)
 	s.proxy.UpdateAllowed(epID1, 54, nil)

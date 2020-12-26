@@ -29,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/loader"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/loadinfo"
@@ -46,6 +47,7 @@ import (
 
 	"github.com/google/renameio"
 	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -84,7 +86,7 @@ func (e *Endpoint) BPFIpvlanMapPath() string {
 //
 // For configuration of actual datapath behavior, see WriteEndpointConfig().
 //
-// e.Mutex must be held
+// e.mutex must be RLock()ed
 func (e *Endpoint) writeInformationalComments(w io.Writer) error {
 	fw := bufio.NewWriter(w)
 
@@ -141,7 +143,7 @@ func (e *Endpoint) writeInformationalComments(w io.Writer) error {
 
 // writeHeaderfile writes the lxc_config.h header file of an endpoint
 //
-// e.Mutex must be held.
+// e.mutex must be RLock()ed.
 func (e *Endpoint) writeHeaderfile(prefix string) error {
 	headerPath := filepath.Join(prefix, common.CHeaderFileName)
 	e.getLogger().WithFields(logrus.Fields{
@@ -201,7 +203,7 @@ func (e *Endpoint) writeHeaderfile(prefix string) error {
 // addNewRedirectsFromDesiredPolicy must be called while holding the endpoint lock for
 // writing. On success, returns nil; otherwise, returns an error indicating the
 // problem that occurred while adding an l7 redirect for the specified policy.
-// Must be called with endpoint.Mutex held.
+// Must be called with endpoint.mutex Lock()ed.
 func (e *Endpoint) addNewRedirectsFromDesiredPolicy(ingress bool, desiredRedirects map[string]bool, proxyWaitGroup *completion.WaitGroup) (error, revert.FinalizeFunc, revert.RevertFunc) {
 	if option.Config.DryMode || e.isProxyDisabled() {
 		return nil, nil, nil
@@ -419,7 +421,7 @@ func (e *Endpoint) addVisibilityRedirects(ingress bool, desiredRedirects map[str
 				labels.NewLabel(policy.LabelKeyPolicyDerivedFrom, policy.LabelVisibilityAnnotation, labels.LabelSourceReserved),
 			},
 		}
-		entry := policy.NewMapStateEntry(derivedFrom, true, false)
+		entry := policy.NewMapStateEntry(nil, derivedFrom, true, false)
 		entry.ProxyPort = redirectPort
 
 		e.desiredPolicy.PolicyMapState[newKey] = entry
@@ -449,7 +451,7 @@ func (e *Endpoint) addVisibilityRedirects(ingress bool, desiredRedirects map[str
 // that occurred while adding an l7 redirect for the specified policy.
 // The returned map contains the exact set of IDs of proxy redirects that is
 // required to implement the given L4 policy.
-// Must be called with endpoint.Mutex held.
+// Must be called with endpoint.mutex Lock()ed.
 func (e *Endpoint) addNewRedirects(proxyWaitGroup *completion.WaitGroup) (desiredRedirects map[string]bool, err error, finalizeFunc revert.FinalizeFunc, revertFunc revert.RevertFunc) {
 	var (
 		finalizeList revert.FinalizeList
@@ -495,7 +497,7 @@ func (e *Endpoint) addNewRedirects(proxyWaitGroup *completion.WaitGroup) (desire
 	}
 }
 
-// Must be called with endpoint.Mutex held.
+// Must be called with endpoint.mutex Lock()ed.
 func (e *Endpoint) removeOldRedirects(desiredRedirects map[string]bool, proxyWaitGroup *completion.WaitGroup) (revert.FinalizeFunc, revert.RevertFunc) {
 	if option.Config.DryMode {
 		return nil, nil
@@ -564,7 +566,7 @@ func (e *Endpoint) removeOldRedirects(desiredRedirects map[string]bool, proxyWai
 // specified endpoint.
 // ReloadDatapath forces the datapath programs to be reloaded. It does
 // not guarantee recompilation of the programs.
-// Must be called with endpoint.Mutex not held and endpoint.buildMutex held.
+// Must be called with endpoint.mutex not held and endpoint.buildMutex held.
 //
 // Returns the policy revision number when the regeneration has called,
 // Whether the new state dir is populated with all new BPF state files, and
@@ -761,11 +763,11 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (he
 			if !option.Config.DryMode {
 				ipv4 := option.Config.EnableIPv4
 				ipv6 := option.Config.EnableIPv6
-				created := ctmap.Exists(nil, ipv4, ipv6)
+				exists := ctmap.Exists(nil, ipv4, ipv6)
 				if e.ConntrackLocal() {
-					created = ctmap.Exists(e, ipv4, ipv6)
+					exists = ctmap.Exists(e, ipv4, ipv6)
 				}
-				if created {
+				if exists {
 					e.scrubIPsInConntrackTable()
 				}
 			}
@@ -806,6 +808,7 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (he
 		}
 		// Clean up map contents
 		e.getLogger().Debug("flushing old PolicyMap")
+		e.policyDebug(nil, "runPreCompilationSteps flushing old PolicyMap")
 		err = e.policyMap.DeleteAll()
 		if err != nil {
 			return false, err
@@ -1008,7 +1011,7 @@ func (e *Endpoint) deleteMaps() []error {
 // veth interface.
 func (e *Endpoint) DeleteBPFProgramLocked() error {
 	e.getLogger().Debug("deleting bpf program from endpoint")
-	return e.owner.Datapath().Loader().DeleteDatapath(context.TODO(), e.ifName, "ingress")
+	return loader.RemoveTCFilters(e.ifName, netlink.HANDLE_MIN_INGRESS)
 }
 
 // garbageCollectConntrack will run the ctmap.GC() on either the endpoint's
@@ -1094,19 +1097,20 @@ func (e *Endpoint) deletePolicyKey(keyToDelete policy.Key, incremental bool, had
 		return false
 	}
 
-	if hadProxy != nil {
-		if entry, ok := e.realizedPolicy.PolicyMapState[keyToDelete]; ok && entry.ProxyPort != 0 {
-			*hadProxy = true
-		}
+	var entry policy.MapStateEntry
+	var ok bool
+	if entry, ok = e.realizedPolicy.PolicyMapState[keyToDelete]; ok && entry.ProxyPort != 0 && hadProxy != nil {
+		*hadProxy = true
 	}
 
 	// Operation was successful, remove from realized state.
 	delete(e.realizedPolicy.PolicyMapState, keyToDelete)
 
-	// Incremental updates need to update the desired state as well.
-	if incremental && e.desiredPolicy != e.realizedPolicy {
-		delete(e.desiredPolicy.PolicyMapState, keyToDelete)
-	}
+	e.policyDebug(logrus.Fields{
+		logfields.BPFMapKey:   keyToDelete,
+		logfields.BPFMapValue: entry,
+		"incremental":         incremental,
+	}, "deletePolicyKey")
 
 	return true
 }
@@ -1137,11 +1141,11 @@ func (e *Endpoint) addPolicyKey(keyToAdd policy.Key, entry policy.MapStateEntry,
 	// Operation was successful, add to realized state.
 	e.realizedPolicy.PolicyMapState[keyToAdd] = entry
 
-	// Incremental updates need to update the desired state as well.
-	if incremental && e.desiredPolicy != e.realizedPolicy {
-		e.desiredPolicy.PolicyMapState[keyToAdd] = entry
-	}
-
+	e.policyDebug(logrus.Fields{
+		logfields.BPFMapKey:   keyToAdd,
+		logfields.BPFMapValue: entry,
+		"incremental":         incremental,
+	}, "addPolicyKey")
 	return true
 }
 
@@ -1154,6 +1158,8 @@ func (e *Endpoint) ApplyPolicyMapChanges(proxyWaitGroup *completion.WaitGroup) e
 		return err
 	}
 	defer e.unlock()
+
+	e.policyDebug(nil, "ApplyPolicyMapChanges")
 
 	proxyChanges, err := e.applyPolicyMapChanges()
 	if err != nil {
@@ -1176,12 +1182,17 @@ func (e *Endpoint) ApplyPolicyMapChanges(proxyWaitGroup *completion.WaitGroup) e
 func (e *Endpoint) applyPolicyMapChanges() (proxyChanges bool, err error) {
 	errors := 0
 
+	e.policyDebug(nil, "applyPolicyMapChanges")
+
 	//  Note that after successful endpoint regeneration the
 	//  desired and realized policies are the same pointer. During
 	//  the bpf regeneration possible incremental updates are
 	//  collected on the newly computed desired policy, which is
 	//  not fully realized yet. This is why we get the map changes
 	//  from the desired policy here.
+	//  ConsumeMapChanges() applies the incremental updates to the
+	//  desired policy and only returns changes that need to be
+	//  applied to the Endpoint's bpf policy map.
 	adds, deletes := e.desiredPolicy.ConsumeMapChanges()
 
 	// Add policy map entries before deleting to avoid transient drops
@@ -1220,6 +1231,10 @@ func (e *Endpoint) applyPolicyMapChanges() (proxyChanges bool, err error) {
 // difference between the realized and desired policy state without
 // dumping the bpf policy map.
 func (e *Endpoint) syncPolicyMap() error {
+	e.policyDebug(logrus.Fields{
+		"policyRealized": e.realizedPolicy == e.desiredPolicy,
+	}, "syncPolicyMap")
+
 	// Nothing to do if the desired policy is already fully realized.
 	if e.realizedPolicy != e.desiredPolicy {
 		errors := 0
@@ -1241,7 +1256,7 @@ func (e *Endpoint) syncPolicyMap() error {
 		}
 
 		if errors > 0 {
-			return fmt.Errorf("syncPolicyMapDelta failed")
+			return fmt.Errorf("syncPolicyMap failed")
 		}
 	}
 
@@ -1285,15 +1300,11 @@ func (e *Endpoint) addPolicyMapDelta() error {
 // is inserted successfully to the endpoint's BPF PolicyMap, it is added to the
 // endpoint's realizedMapState field. Returns an error if the endpoint's BPF
 // PolicyMap is unable to be dumped, or any update operation to the map fails.
-// Must be called with e.Mutex locked.
+// Must be called with e.mutex Lock()ed.
 func (e *Endpoint) syncPolicyMapWithDump() error {
 
 	if e.realizedPolicy.PolicyMapState == nil {
 		e.realizedPolicy.PolicyMapState = make(policy.MapState)
-	}
-
-	if e.desiredPolicy.PolicyMapState == nil {
-		e.desiredPolicy.PolicyMapState = make(policy.MapState)
 	}
 
 	if e.policyMap == nil {
@@ -1328,6 +1339,11 @@ func (e *Endpoint) syncPolicyMapWithDump() error {
 	}
 
 	errors := 0
+
+	// Log full policy map for every dump
+	e.policyDebug(logrus.Fields{
+		"dumpedPolicyMap": currentMapContents,
+	}, "syncPolicyMapWithDump")
 
 	for _, entry := range currentMapContents {
 		// Convert key to host-byte order for lookup in the desiredMapState.
@@ -1442,63 +1458,5 @@ func (e *Endpoint) ValidateConnectorPlumbing(linkChecker linkCheckerFunc) error 
 			return fmt.Errorf("interface %s could not be found", e.ifName)
 		}
 	}
-	return nil
-}
-
-// FinishIPVLANInit finishes configuring ipvlan slave device of the given endpoint.
-//
-// Unfortunately, Docker libnetwork itself moves a netdev to netns of a container
-// after the Cilium libnetwork plugin driver has responded to a `JoinEndpoint`
-// request. During the move, the netdev qdisc's get flushed by the kernel. Therefore,
-// we need to configure the ipvlan slave device in two stages.
-//
-// Because the function can be called many times for the same container in parallel,
-// we need to make the function idempotent. This is achieved by checking
-// whether the datapath map has been pinned, which indicates previous
-// successful invocation of the function for the same container, before executing
-// the configuration stages.
-//
-// FIXME: Because of the libnetwork limitation mentioned above, we cannot enforce
-// policies for an ipvlan slave before a process of a container has started. So,
-// this enables a window between the two stages during which ALL container traffic
-// is allowed.
-func (e *Endpoint) FinishIPVLANInit(netNsPath string) error {
-	if netNsPath == "" {
-		return fmt.Errorf("netNsPath is empty")
-	}
-
-	// Just ignore if the endpoint is dying
-	if err := e.lockAlive(); err != nil {
-		return nil
-	}
-	defer e.unlock()
-
-	// No need to finish IPVLAN initialization for Docker if the endpoint isn't
-	// running with Docker.
-	if e.dockerNetworkID == "" {
-		return nil
-	}
-
-	if e.isDatapathMapPinned {
-		// The datapath map is pinned which implies that the post-initialization
-		// for the ipvlan slave has been successfully performed
-		return nil
-	}
-
-	mapFD, mapID, err := e.owner.Datapath().SetupIPVLAN(netNsPath)
-	if err != nil {
-		return fmt.Errorf("Unable to setup ipvlan slave: %s", err)
-	}
-
-	// Do not close the fd too early, as the subsequent pinning would
-	// fail due to the map being removed by the kernel
-	defer func() {
-		unix.Close(mapFD)
-	}()
-
-	if err = e.setDatapathMapIDAndPinMap(mapID); err != nil {
-		return fmt.Errorf("Unable to pin datapath map: %s", err)
-	}
-
 	return nil
 }

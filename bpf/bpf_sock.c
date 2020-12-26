@@ -264,6 +264,55 @@ sock4_wildcard_lookup_full(struct lb4_key *key __maybe_unused,
 	return svc;
 }
 
+/* Service translation logic for a local-redirect service can cause packets to
+ * be looped back to a service node-local backend after translation. This can
+ * happen when the node-local backend itself tries to connect to the service
+ * frontend for which it acts as a backend. There are cases where this can break
+ * traffic flow if the backend needs to forward the redirected traffic to the
+ * actual service frontend. Hence, allow service translation for pod traffic
+ * getting redirected to backend (across network namespaces), but skip service
+ * translation for backend to itself or another service backend within the same
+ * namespace. Currently only v4 and v4-in-v6, but no plain v6 is supported.
+ *
+ * For example, in EKS cluster, a local-redirect service exists with the AWS
+ * metadata IP, port as the frontend <169.254.169.254, 80> and kiam proxy as a
+ * backend Pod. When traffic destined to the frontend originates from the kiam
+ * Pod in namespace ns1 (host ns when the kiam proxy Pod is deployed in
+ * hostNetwork mode or regular Pod ns) and the Pod is selected as a backend, the
+ * traffic would get looped back to the proxy Pod. Identify such cases by doing
+ * a socket lookup for the backend <ip, port> in its namespace, ns1, and skip
+ * service translation.
+ */
+static __always_inline bool
+sock4_skip_xlate_if_same_netns(struct bpf_sock_addr *ctx __maybe_unused,
+			       const struct lb4_backend *backend __maybe_unused)
+{
+#ifdef BPF_HAVE_SOCKET_LOOKUP
+	struct bpf_sock_tuple tuple = {
+		.ipv4.daddr = backend->address,
+		.ipv4.dport = backend->port,
+	};
+	struct bpf_sock *sk = NULL;
+
+	switch (ctx->protocol) {
+	case IPPROTO_TCP:
+		sk = sk_lookup_tcp(ctx, &tuple, sizeof(tuple.ipv4),
+				   BPF_F_CURRENT_NETNS, 0);
+		break;
+	case IPPROTO_UDP:
+		sk = sk_lookup_udp(ctx, &tuple, sizeof(tuple.ipv4),
+				   BPF_F_CURRENT_NETNS, 0);
+		break;
+	}
+
+	if (sk) {
+		sk_release(sk);
+		return true;
+	}
+#endif /* BPF_HAVE_SOCKET_LOOKUP */
+	return false;
+}
+
 static __always_inline int __sock4_xlate_fwd(struct bpf_sock_addr *ctx,
 					     struct bpf_sock_addr *ctx_full,
 					     const bool udp_only)
@@ -272,17 +321,15 @@ static __always_inline int __sock4_xlate_fwd(struct bpf_sock_addr *ctx,
 	const bool in_hostns = ctx_in_hostns(ctx_full, &id.client_cookie);
 	struct lb4_backend *backend;
 	struct lb4_service *svc;
-	__u32 proto = ctx->protocol;
 	struct lb4_key key = {
 		.address	= ctx->user_ip4,
 		.dport		= ctx_dst_port(ctx),
-		.proto		= proto,
 	}, orig_key = key;
 	struct lb4_service *backend_slot;
 	bool backend_from_affinity = false;
 	__u32 backend_id = 0;
 
-	if (!udp_only && !sock_proto_enabled(proto))
+	if (!udp_only && !sock_proto_enabled(ctx->protocol))
 		return -ENOTSUP;
 
 	/* In case a direct match fails, we try to look-up surrogate
@@ -347,6 +394,10 @@ static __always_inline int __sock4_xlate_fwd(struct bpf_sock_addr *ctx,
 		return -ENOENT;
 	}
 
+	if (lb4_svc_is_localredirect(svc) &&
+	    sock4_skip_xlate_if_same_netns(ctx_full, backend))
+		return -ENXIO;
+
 	if (lb4_svc_is_affinity(svc) && !backend_from_affinity)
 		lb4_update_affinity_by_netns(svc, &id, backend_id);
 
@@ -374,14 +425,12 @@ static __always_inline int __sock4_bind(struct bpf_sock *ctx,
 					struct bpf_sock *ctx_full)
 {
 	struct lb4_service *svc;
-	__u32 proto = ctx->protocol;
 	struct lb4_key key = {
 		.address	= ctx->src_ip4,
 		.dport		= ctx_src_port(ctx),
-		.proto		= proto,
 	};
 
-	if (!sock_proto_enabled(proto) ||
+	if (!sock_proto_enabled(ctx->protocol) ||
 	    !ctx_in_hostns(ctx_full, NULL))
 		return 0;
 
@@ -432,7 +481,6 @@ static __always_inline int __sock4_xlate_rev(struct bpf_sock_addr *ctx,
 		struct lb4_key svc_key = {
 			.address	= val->address,
 			.dport		= val->port,
-			.proto		= ctx->protocol,
 		};
 
 		svc = lb4_lookup_service(&svc_key, true);
@@ -677,13 +725,11 @@ sock6_bind_v4_in_v6(struct bpf_sock *ctx __maybe_unused)
 static __always_inline int __sock6_bind(struct bpf_sock *ctx)
 {
 	struct lb6_service *svc;
-	__u32 proto = ctx->protocol;
 	struct lb6_key key = {
 		.dport		= ctx_src_port(ctx),
-		.proto		= proto,
 	};
 
-	if (!sock_proto_enabled(proto) ||
+	if (!sock_proto_enabled(ctx->protocol) ||
 	    !ctx_in_hostns(ctx, NULL))
 		return 0;
 
@@ -722,16 +768,14 @@ static __always_inline int __sock6_xlate_fwd(struct bpf_sock_addr *ctx,
 	const bool in_hostns = ctx_in_hostns(ctx, &id.client_cookie);
 	struct lb6_backend *backend;
 	struct lb6_service *svc;
-	__u32 proto = ctx->protocol;
 	struct lb6_key key = {
 		.dport		= ctx_dst_port(ctx),
-		.proto		= proto,
 	}, orig_key;
 	struct lb6_service *backend_slot;
 	bool backend_from_affinity = false;
 	__u32 backend_id = 0;
 
-	if (!udp_only && !sock_proto_enabled(proto))
+	if (!udp_only && !sock_proto_enabled(ctx->protocol))
 		return -ENOTSUP;
 
 	ctx_get_v6_address(ctx, &key.address);
@@ -848,7 +892,6 @@ static __always_inline int __sock6_xlate_rev(struct bpf_sock_addr *ctx)
 		struct lb6_key svc_key = {
 			.address	= val->address,
 			.dport		= val->port,
-			.proto		= ctx->protocol,
 		};
 
 		svc = lb6_lookup_service(&svc_key, true);

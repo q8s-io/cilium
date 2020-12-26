@@ -4,10 +4,6 @@
 
 Update a service
 
-### Synopsis
-
-Update a service
-
 ```
 cilium service update [flags]
 ```
@@ -26,7 +22,6 @@ cilium service update [flags]
       --k8s-node-port               Set service as a k8s NodePort
       --k8s-traffic-policy string   Set service with k8s externalTrafficPolicy as {Local,Cluster} (default "Cluster")
       --local-redirect              Set service as Local Redirect
-      --protocol string             Protocol for service (e.g. TCP, UDP) (default "tcp")
 ```
 
 ### Options inherited from parent commands

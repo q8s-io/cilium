@@ -18,7 +18,7 @@ Committers may nominate PRs that have been merged into master as candidates for
 backport into stable releases if they affect the stable production usage
 of community users.
 
-Backport criteria for current minor release
+Backport Criteria for Current Minor Release
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Criteria for inclusion into the next stable release of the current latest
@@ -27,7 +27,7 @@ release of version ``v1.3.0``:
 
 - All bugfixes
 
-Backport criteria for X.Y-1.Z and X.Y-2.Z
+Backport Criteria for X.Y-1.Z and X.Y-2.Z
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Criteria for the inclusion into the next stable release of the prior two minor
@@ -38,7 +38,7 @@ the release of version ``v1.3.0``:
 - Major bugfixes relevant to the correct operation of Cilium
 
 
-Backporting guide for the backporter
+Backporting Guide for the Backporter
 ------------------------------------
 
 Cilium PRs that are marked with the label ``needs-backport/X.Y`` need to be
@@ -52,7 +52,7 @@ process for backporting these PRs:
 
 .. _backport_setup:
 
-One-time setup
+One-time Setup
 ~~~~~~~~~~~~~~
 
 #. The scripts referred to below need to be run on Linux, they do not
@@ -66,8 +66,10 @@ One-time setup
       $ git config --global user.email johndoe@example.com
 
 #. Make sure you have a GitHub developer access token with the ``public_repos``
-   scope available. For details, see `contrib/backporting/README.md
-   <https://github.com/cilium/cilium/blob/master/contrib/backporting/README.md>`_
+   scope available. You can do this directly from
+   https://github.com/settings/tokens or by opening GitHub and then navigating
+   to: User Profile -> Settings -> Developer Settings -> Personal access token
+   -> Generate new token.
 
 #. This guide makes use of several tools to automate the backporting process.
    The basics require ``bash`` and ``git``, but to automate interactions with
@@ -89,6 +91,12 @@ One-time setup
    | `Github hub CLI <https://github.com/github/hub>`_            | No        | N/A (OS-specific)                                       |
    +--------------------------------------------------------------+-----------+---------------------------------------------------------+
 
+   Verify your machine is correctly configured by running
+
+   .. code-block:: bash
+
+      $ go run ./tools/dev-doctor --backporting
+
 Preparation
 ~~~~~~~~~~~
 
@@ -105,7 +113,7 @@ stable release version X.Y). If any PRs contain labels such as
 ``backport-pending/X.Y``, ensure that the backport for that PR have been merged
 and if so, change the label to ``backport-done/X.Y``.
 
-Creating the backports branch
+Creating the Backports Branch
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 #. Run ``contrib/backporting/start-backport`` for the release version that
@@ -164,14 +172,14 @@ Creating the backports branch
 
       $ git push -u origin HEAD
 
-Creating the backport pull request
+Creating the Backport Pull Request
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The backport pull-request may be created via CLI tools, or alternatively
 you can use the GitHub web interface to achieve these steps.
 
-Via command-line tools
-^^^^^^^^^^^^^^^^^^^^^^
+Via Command-Line Tools (Recommended)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 These steps require all of the tools described in the :ref:`backport_setup`
 section above. It pushes the git tree, creates the pull request and updates
@@ -182,7 +190,7 @@ the labels for the PRs that are backported, based on the
 
       $ GITHUB_TOKEN=xxx contrib/backporting/submit-backport
 
-Via GitHub web interface
+Via GitHub Web Interface
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 #. Create a new PR from your branch towards the feature branch you are
@@ -213,12 +221,12 @@ Via GitHub web interface
    backport PRs later.
 
 #. Mark all PRs you backported with the backport pending label
-   ``backport-pending/X.Y`` and clear the ``needs-backport/vX.Y`` label. This
+   ``backport-pending/X.Y`` and clear the ``needs-backport/X.Y`` label. This
    can be done with the command printed out at the bottom of the output from
    the ``start-backport`` script above (``GITHUB_TOKEN`` needs to be set for
    this to work).
 
-Running the CI against the pull request
+Running the CI Against the Pull Request
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To validate a cross-section of various tests against the PRs, backport PRs
@@ -226,7 +234,7 @@ should be validated in the CI by running all CI targets. This can be triggered
 by adding a comment to the PR with exactly the text ``test-backport-x.x``, where ``x.x`` is the target version.
 The comment must not contain any other characters.
 
-After the backports are merged
+After the Backports are Merged
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 After the backport PR is merged, if the person who merged the PR didn't take
@@ -239,10 +247,10 @@ listed in the pull request description.
 
    $ GITHUB_TOKEN=xxx for pr in 12589 12568; do contrib/backporting/set-labels.py $pr done 1.8; done
 
-Backporting guide for others
+Backporting Guide for Others
 ----------------------------
 
-Original committers and reviewers
+Original Committers and Reviewers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Committers should mark PRs needing backport as ``needs-backport/X.Y``, based on

@@ -25,9 +25,9 @@ import (
 	"github.com/cilium/cilium/pkg/aws/types"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/uuid"
 
 	"github.com/cilium/ipam/service/ipallocator"
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 )
 
@@ -166,7 +166,7 @@ func (e *API) rateLimit() {
 	}
 }
 
-func (e *API) CreateNetworkInterface(ctx context.Context, toAllocate int64, subnetID, desc string, groups []string) (string, *eniTypes.ENI, error) {
+func (e *API) CreateNetworkInterface(ctx context.Context, toAllocate int32, subnetID, desc string, groups []string) (string, *eniTypes.ENI, error) {
 	e.rateLimit()
 	e.delaySim.Delay(CreateNetworkInterface)
 
@@ -186,7 +186,7 @@ func (e *API) CreateNetworkInterface(ctx context.Context, toAllocate int64, subn
 		return "", nil, fmt.Errorf("subnet %s has not enough addresses available", subnetID)
 	}
 
-	eniID := uuid.NewUUID().String()
+	eniID := uuid.New().String()
 	eni := &eniTypes.ENI{
 		ID:          eniID,
 		Description: desc,
@@ -196,7 +196,7 @@ func (e *API) CreateNetworkInterface(ctx context.Context, toAllocate int64, subn
 		SecurityGroups: groups,
 	}
 
-	for i := int64(0); i < toAllocate; i++ {
+	for i := int32(0); i < toAllocate; i++ {
 		ip, err := e.allocator.AllocateNext()
 		if err != nil {
 			panic("Unable to allocate IP from allocator")
@@ -231,7 +231,7 @@ func (e *API) DeleteNetworkInterface(ctx context.Context, eniID string) error {
 	return fmt.Errorf("ENI ID %s not found", eniID)
 }
 
-func (e *API) AttachNetworkInterface(ctx context.Context, index int64, instanceID, eniID string) (string, error) {
+func (e *API) AttachNetworkInterface(ctx context.Context, index int32, instanceID, eniID string) (string, error) {
 	e.rateLimit()
 	e.delaySim.Delay(AttachNetworkInterface)
 
@@ -274,7 +274,7 @@ func (e *API) ModifyNetworkInterface(ctx context.Context, eniID, attachmentID st
 	return nil
 }
 
-func (e *API) AssignPrivateIpAddresses(ctx context.Context, eniID string, addresses int64) error {
+func (e *API) AssignPrivateIpAddresses(ctx context.Context, eniID string, addresses int32) error {
 	e.rateLimit()
 	e.delaySim.Delay(AssignPrivateIpAddresses)
 
@@ -296,7 +296,7 @@ func (e *API) AssignPrivateIpAddresses(ctx context.Context, eniID string, addres
 				return fmt.Errorf("subnet %s has not enough addresses available", eni.Subnet.ID)
 			}
 
-			for i := int64(0); i < addresses; i++ {
+			for i := int32(0); i < addresses; i++ {
 				ip, err := e.allocator.AllocateNext()
 				if err != nil {
 					panic("Unable to allocate IP from allocator")

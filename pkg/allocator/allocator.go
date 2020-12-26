@@ -22,14 +22,15 @@ import (
 
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/idpool"
+	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/rate"
-	"github.com/cilium/cilium/pkg/uuid"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -173,6 +174,14 @@ func NewAllocatorForGC(backend Backend) *Allocator {
 	return &Allocator{backend: backend}
 }
 
+type GCStats struct {
+	// Alive is the number of identities alive
+	Alive int
+
+	// Deleted is the number of identities deleted
+	Deleted int
+}
+
 // Backend represents clients to remote ID allocation systems, such as KV
 // Stores. These are used to coordinate key->ID allocation between cilium
 // nodes.
@@ -243,7 +252,7 @@ type Backend interface {
 	// by cilium-agent.
 	// Note: not all Backend implemenations rely on this, such as the kvstore
 	// backends, and may use leases to expire keys.
-	RunGC(ctx context.Context, rateLimit *rate.Limiter, staleKeysPrevRound map[string]uint64) (map[string]uint64, error)
+	RunGC(ctx context.Context, rateLimit *rate.Limiter, staleKeysPrevRound map[string]uint64) (map[string]uint64, *GCStats, error)
 
 	// RunLocksGC reaps stale or unused locks within the Backend. It is used by
 	// the cilium-operator and is not invoked by cilium-agent. Returns
@@ -278,7 +287,7 @@ func NewAllocator(typ AllocatorKey, backend Backend, opts ...AllocatorOption) (*
 		max:          idpool.ID(^uint64(0)),
 		localKeys:    newLocalKeys(),
 		stopGC:       make(chan struct{}),
-		suffix:       uuid.NewUUID().String()[:10],
+		suffix:       uuid.New().String()[:10],
 		remoteCaches: map[*RemoteCache]struct{}{},
 		backoffTemplate: backoff.Exponential{
 			Min:    time.Duration(20) * time.Millisecond,
@@ -802,7 +811,7 @@ func (a *Allocator) Release(ctx context.Context, key AllocatorKey) (lastUse bool
 }
 
 // RunGC scans the kvstore for unused master keys and removes them
-func (a *Allocator) RunGC(rateLimit *rate.Limiter, staleKeysPrevRound map[string]uint64) (map[string]uint64, error) {
+func (a *Allocator) RunGC(rateLimit *rate.Limiter, staleKeysPrevRound map[string]uint64) (map[string]uint64, *GCStats, error) {
 	return a.backend.RunGC(context.TODO(), rateLimit, staleKeysPrevRound)
 }
 
@@ -841,6 +850,8 @@ func (a *Allocator) syncLocalKeys() error {
 
 func (a *Allocator) startLocalKeySync() {
 	go func(a *Allocator) {
+		kvTimer, kvTimerDone := inctimer.New()
+		defer kvTimerDone()
 		for {
 			if err := a.syncLocalKeys(); err != nil {
 				log.WithError(err).Warning("Unable to run local key sync routine")
@@ -850,7 +861,7 @@ func (a *Allocator) startLocalKeySync() {
 			case <-a.stopGC:
 				log.Debug("Stopped master key sync routine")
 				return
-			case <-time.After(option.Config.KVstorePeriodicSync):
+			case <-kvTimer.After(option.Config.KVstorePeriodicSync):
 			}
 		}
 	}(a)

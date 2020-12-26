@@ -24,10 +24,10 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/uuid"
 	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
 
+	"github.com/google/uuid"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/types"
 	"github.com/sirupsen/logrus"
@@ -1031,7 +1031,8 @@ var _ = Describe("K8sPolicyTest", func() {
 				validateL3L4(denyAll)
 			})
 
-			It("Verifies that a CNP with L7 HTTP rules can be replaced with L7 Kafka rules", func() {
+			// Tests involving the L7 proxy do not work when built with -race, see issue #13757.
+			SkipItIf(helpers.SkipRaceDetectorEnabled, "Verifies that a CNP with L7 HTTP rules can be replaced with L7 Kafka rules", func() {
 				By("Installing L7 Policy")
 
 				// This HTTP policy was already validated in the
@@ -1063,8 +1064,8 @@ var _ = Describe("K8sPolicyTest", func() {
 			})
 		})
 
-		Context("Traffic redirections to proxy", func() {
-
+		// Tests involving the L7 proxy do not work when built with -race, see issue #13757.
+		SkipContextIf(helpers.SkipRaceDetectorEnabled, "Traffic redirections to proxy", func() {
 			var (
 				// track which app1 pod we care about, and its corresponding
 				// cilium pod.
@@ -1171,7 +1172,7 @@ var _ = Describe("K8sPolicyTest", func() {
 					Fail(fmt.Sprintf("invalid parser type for proxy visibility: %s", parser))
 				}
 
-				observeFile := fmt.Sprintf("hubble-observe-%s", uuid.NewUUID().String())
+				observeFile := fmt.Sprintf("hubble-observe-%s", uuid.New().String())
 
 				// curl commands are issued from the first k8s worker where all
 				// the app instances are running
@@ -1441,13 +1442,13 @@ var _ = Describe("K8sPolicyTest", func() {
 				importPolicy(kubectl, testNamespace, cnpDenyIngress, "default-deny-ingress")
 
 				count := testConnectivity(backendPodIP, false)
-				monitorCancel()
+				defer monitorCancel()
 
 				By("Asserting that the expected policy verdict logs are in the monitor output")
-				Expect(
-					len(policyVerdictDenyRegex.FindAll(monitor.CombineOutput().Bytes(), -1)),
-				).To(BeNumerically(">=", count),
-					"Monitor output does not show traffic as denied")
+				Eventually(func() int {
+					return len(policyVerdictDenyRegex.FindAll(monitor.CombineOutput().Bytes(), -1))
+				}).Should(BeNumerically(">=", count), "Monitor output is missing verdicts: %s\n%s",
+					policyVerdictDenyRegex, monitor.CombineOutput().Bytes())
 			})
 
 			It("connectivity is restored after importing ingress policy", func() {
@@ -1472,13 +1473,13 @@ var _ = Describe("K8sPolicyTest", func() {
 					"cnp-ingress-from-cidr-to-ports.yaml")
 				importPolicy(kubectl, testNamespace, cnpAllowIngress, "ingress-from-cidr-to-ports")
 				count := testConnectivity(backendPodIP, true)
-				monitorCancel()
+				defer monitorCancel()
 
 				By("Asserting that the expected policy verdict logs are in the monitor output")
-				Expect(
-					len(policyVerdictAllowRegex.FindAll(monitor.CombineOutput().Bytes(), -1)),
-				).To(BeNumerically(">=", count),
-					"Monitor output does not show traffic as allowed")
+				Eventually(func() int {
+					return len(policyVerdictAllowRegex.FindAll(monitor.CombineOutput().Bytes(), -1))
+				}).Should(BeNumerically(">=", count), "Monitor output is missing verdicts: %s\n%s",
+					policyVerdictAllowRegex, monitor.CombineOutput().Bytes())
 			})
 
 			Context("With host policy", func() {
@@ -1520,13 +1521,13 @@ var _ = Describe("K8sPolicyTest", func() {
 
 					testConnectivity(backendPodIP, true)
 					count := testConnectivity(hostIPOfBackendPod, false)
-					monitorCancel()
+					defer monitorCancel()
 
 					By("Asserting that the expected policy verdict logs are in the monitor output")
-					Expect(
-						len(policyVerdictDenyRegex.FindAll(monitor.CombineOutput().Bytes(), -1)),
-					).To(BeNumerically(">=", count),
-						"Monitor output does not show traffic as denied: %s", policyVerdictDenyRegex)
+					Eventually(func() int {
+						return len(policyVerdictDenyRegex.FindAll(monitor.CombineOutput().Bytes(), -1))
+					}).Should(BeNumerically(">=", count), "Monitor output is missing verdicts: %s\n%s",
+						policyVerdictDenyRegex, monitor.CombineOutput().Bytes())
 				})
 
 				It("Connectivity is restored after importing ingress policy", func() {
@@ -1551,13 +1552,13 @@ var _ = Describe("K8sPolicyTest", func() {
 
 					testConnectivity(backendPodIP, true)
 					count := testConnectivity(hostIPOfBackendPod, true)
-					monitorCancel()
+					defer monitorCancel()
 
 					By("Asserting that the expected policy verdict logs are in the monitor output")
-					Expect(
-						len(policyVerdictAllowRegex.FindAll(monitor.CombineOutput().Bytes(), -1)),
-					).To(BeNumerically(">=", count),
-						"Monitor output does not show traffic as denied: %s", policyVerdictDenyRegex)
+					Eventually(func() int {
+						return len(policyVerdictAllowRegex.FindAll(monitor.CombineOutput().Bytes(), -1))
+					}).Should(BeNumerically(">=", count), "Monitor output is missing verdicts: %s\n%s",
+						policyVerdictAllowRegex, monitor.CombineOutput().Bytes())
 
 					By("Removing the fromCIDR+toPorts ingress host policy")
 					// This is to ensure this policy is always removed before the default-deny one.
@@ -1732,7 +1733,7 @@ var _ = Describe("K8sPolicyTest", func() {
 				"Web policy cannot be deleted")
 			k8sVersion := helpers.GetCurrentK8SEnv()
 			switch k8sVersion {
-			case "1.10", "1.11", "1.12", "1.13", "1.14", "1.15":
+			case "1.13", "1.14", "1.15":
 				kubectl.Delete(helpers.ManifestGet(kubectl.BasePath(), redisPolicyDeprecated)).ExpectSuccess(
 					"Redis deprecated policy cannot be deleted")
 			default:
@@ -1827,7 +1828,7 @@ var _ = Describe("K8sPolicyTest", func() {
 
 			k8sVersion := helpers.GetCurrentK8SEnv()
 			switch k8sVersion {
-			case "1.10", "1.11", "1.12", "1.13", "1.14", "1.15":
+			case "1.13", "1.14", "1.15":
 			default:
 				Skip(fmt.Sprintf("K8s %s doesn't support extensions/v1beta1 NetworkPolicies, skipping test", k8sVersion))
 			}

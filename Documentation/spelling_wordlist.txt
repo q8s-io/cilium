@@ -30,6 +30,8 @@ Clusterwide
 Committer
 Committers
 ConnectX
+Corefile
+CronJob
 DDoS
 DMA'ed
 DNS
@@ -203,6 +205,7 @@ apps
 arithmetics
 artii
 asm
+assignees
 au
 authenticator
 autoDirectNodeRoutes
@@ -247,6 +250,7 @@ bugtool
 bytecode
 cBPF
 callee
+cancelled
 cardinality
 cass
 cassandra
@@ -291,6 +295,7 @@ crd
 crdWaitTimeout
 createtopic
 cri
+cronJob
 crt
 crypto
 cryptographic
@@ -341,6 +346,7 @@ eBPF
 eXpress
 ebpf
 egressMasqueradeInterfaces
+egressing
 elfutils
 ena
 enableCnpStatusUpdates
@@ -382,9 +388,11 @@ fromEndpoints
 fromEntities
 frontend
 fs
+func
 functionalities
 fwmark
 gRPC
+gVNIC
 gcc
 gcloud
 gcp
@@ -400,6 +408,7 @@ gocheck
 golang
 golangci
 golangci-lint
+gops
 grafana
 grep
 hairpinned
@@ -415,13 +424,16 @@ hexData
 hoc
 hostConfDirMountPath
 hostFirewall
+hostNetwork
 hostPort
 hostServices
+hostname
 hostonlyif
 hostonlyifs
 hostport
 hostscope
 hq
+httpd
 https
 hubble
 hubble-relay
@@ -492,6 +504,7 @@ keepDeprecatedProbes
 keyFile
 keyspace
 keyspaces
+kiam
 kops
 kprobe
 kprobes
@@ -507,6 +520,7 @@ kubeproxy
 kubernetes
 kubespray
 kvstore
+latencies
 lbMapMax
 leia
 libbpf
@@ -526,6 +540,7 @@ listenPort
 liveness
 llc
 llvm
+loadBalancer
 loadbalancer
 loadbalancers
 loadbalancing
@@ -538,6 +553,7 @@ logout
 lookup
 lookups
 loopback
+lrp
 lspci
 luke
 lwt
@@ -668,6 +684,7 @@ queryable
 queueing
 rbac
 rc
+readinessProbe
 readthedocs
 rebase
 rebased
@@ -700,6 +717,8 @@ runtime
 runtimes
 sNodes
 sService
+sServiceHost
+sServicePort
 sa
 sandboxing
 scalability
@@ -715,12 +734,15 @@ serviceMonitor
 servicePort
 sessionAffinity
 setrlimit
+setupinterface
+setupiptables
 sfc
 sg
 sha
 sidecarImageRegex
 sig
 skb
+skipteardown
 sleepAfterInit
 socketPath
 sockmap
@@ -759,6 +781,7 @@ sys
 syscall
 sysctl
 sysctls
+sysdump
 systemd
 systemtap
 tableSize
@@ -802,6 +825,7 @@ unix
 unmanaged
 untriaged
 untrusted
+unwinded
 uplink
 uprobes
 upstreamed
@@ -821,6 +845,7 @@ vers
 versa
 versioning
 veth
+virtIO
 virtio
 virtualbox
 virtualization
@@ -831,7 +856,6 @@ waitForMount
 waker
 walkthrough
 webservice
-wellKnownIdentities
 whitelist
 whitelisted
 whitelisting

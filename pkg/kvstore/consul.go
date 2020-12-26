@@ -25,6 +25,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
@@ -314,16 +315,19 @@ func (c *consulClient) Watch(ctx context.Context, w *Watcher) {
 
 	qo := q.WithContext(ctx)
 
+	sleepTimer, sleepTimerDone := inctimer.New()
+	defer sleepTimerDone()
+
 	for {
 		// Initialize sleep time to a millisecond as we don't
 		// want to sleep in between successful watch cycles
 		sleepTime := 1 * time.Millisecond
 
 		qo.WaitIndex = nextIndex
-		pairs, q, err := c.KV().List(w.prefix, qo)
+		pairs, q, err := c.KV().List(w.Prefix, qo)
 		if err != nil {
 			sleepTime = 5 * time.Second
-			Trace("List of Watch failed", err, logrus.Fields{fieldPrefix: w.prefix, fieldWatcher: w.name})
+			Trace("List of Watch failed", err, logrus.Fields{fieldPrefix: w.Prefix, fieldWatcher: w.Name})
 		}
 
 		if q != nil {
@@ -391,7 +395,7 @@ func (c *consulClient) Watch(ctx context.Context, w *Watcher) {
 
 	wait:
 		select {
-		case <-time.After(sleepTime):
+		case <-sleepTimer.After(sleepTime):
 		case <-w.stopWatch:
 			close(w.Events)
 			w.stopWait.Done()

@@ -69,12 +69,12 @@ Distribution               Minimum Version
 `Amazon Linux 2`_          all
 `Container-Optimized OS`_  all
 `CentOS`_                  >= 7.0 [#centos_foot]_
-CoreOS_                    stable (>= 1298.5.0)
 Debian_                    >= 9 Stretch
 `Fedora Atomic/Core`_      >= 25
+Flatcar_                   all
 LinuxKit_                  all
 `RedHat Enterprise Linux`_ >= 8.0
-Ubuntu_                    >= 16.04.2, >= 16.10
+Ubuntu_                    >= 16.04.1 (Azure), >= 16.04.2 (Canonical), >= 16.10
 Opensuse_                  Tumbleweed, >=Leap 15.0
 RancherOS_                 >= 1.5.5
 ========================== ====================
@@ -82,9 +82,9 @@ RancherOS_                 >= 1.5.5
 .. _Amazon Linux 2: https://aws.amazon.com/amazon-linux-2/
 .. _CentOS: https://centos.org
 .. _Container-Optimized OS: https://cloud.google.com/container-optimized-os/docs
-.. _CoreOS: https://coreos.com/releases/
 .. _Debian: https://wiki.debian.org/DebianStretch
 .. _Fedora Atomic/Core: http://www.projectatomic.io/blog/2017/03/fedora_atomic_2week_2/
+.. _Flatcar: https://www.flatcar-linux.org/
 .. _LinuxKit: https://github.com/linuxkit/linuxkit/tree/master/kernel
 .. _RedHat Enterprise Linux: https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux
 .. _Ubuntu: https://wiki.ubuntu.com/YakketyYak/ReleaseNotes#Linux_kernel_4.8
@@ -97,6 +97,16 @@ RancherOS_                 >= 1.5.5
 .. note:: The above list is based on feedback by users. If you find an unlisted
           Linux distribution that works well, please let us know by opening a
           GitHub issue or by creating a pull request that updates this guide.
+
+.. note:: Systemd 245 and above (``systemctl --version``) overrides ``rp_filter`` setting
+          of Cilium network interfaces. This introduces connectivity issues (see
+          `GH-10645 <https://github.com/cilium/cilium/issues/10645>`_ for details). To
+          avoid that, configure ``rp_filter`` in systemd using the following commands:
+
+          .. code:: bash
+
+              echo 'net.ipv4.conf.lxc*.rp_filter = 0' > /etc/sysctl.d/99-override_cilium_rp_filter.conf
+              systemctl restart systemd-sysctl
 
 .. _admin_kernel_version:
 
@@ -179,6 +189,7 @@ Cilium Feature                           Minimum Kernel Version
 :ref:`local-redirect-policy`             >= 4.19.57, >= 5.1.16,  >= 5.2
 Full support for :ref:`session-affinity` >= 5.7
 BPF-based proxy redirection              >= 5.7
+BPF-based host routing                   >= 5.10
 ======================================== ===============================
 
 .. _req_kvstore:
@@ -307,16 +318,65 @@ ICMP 8/0                 egress          ``worker-sg`` (self) health checks
 
 The following ports should also be available on each node:
 
-======================== ==========================================
+======================== ===========================================================
 Port Range / Protocol    Description
-======================== ==========================================
+======================== ===========================================================
 4240/tcp                 cluster health checks (``cilium-health``)
 4244/tcp                 Hubble server
 4245/tcp                 Hubble Relay
 6942/tcp                 operator Prometheus metrics
 9090/tcp                 cilium-agent Prometheus metrics
 9876/tcp                 cilium-agent health status API
-======================== ==========================================
+9890/tcp                 cilium-agent gops server (listening on 127.0.0.1)
+9891/tcp                 operator gops server (listening on 127.0.0.1)
+9892/tcp                 clustermesh-apiserver gops server (listening on 127.0.0.1)
+9893/tcp                 Hubble Relay gops server (listening on 127.0.0.1)
+======================== ===========================================================
+
+.. _admin_mount_bpffs:
+
+Mounted eBPF filesystem
+=======================
+
+.. Note::
+
+        Some distributions mount the bpf filesystem automatically. Check if the
+        bpf filesystem is mounted by running the command.
+
+        .. code-block:: shell-session
+
+                  mount | grep /sys/fs/bpf
+                  # if present should output, e.g. "none on /sys/fs/bpf type bpf"...
+
+This step is **required for production** environments but optional for testing
+and development. It allows the ``cilium-agent`` to pin eBPF resources to a
+persistent filesystem and make them persistent across restarts of the agent.
+If the eBPF filesystem is not mounted in the host filesystem, Cilium will
+automatically mount the filesystem but it will be unmounted and re-mounted when
+the Cilium pod is restarted. This in turn will cause eBPF resources to be
+re-created which will cause network connectivity to be disrupted while Cilium
+is not running. Mounting the eBPF filesystem in the host mount namespace will
+ensure that the agent can be restarted without affecting connectivity of any
+pods.
+
+In order to mount the eBPF filesystem, the following command must be run in the
+host mount namespace. The command must only be run once during the boot process
+of the machine.
+
+.. code:: bash
+
+	mount bpffs /sys/fs/bpf -t bpf
+
+A portable way to achieve this with persistence is to add the following line to
+``/etc/fstab`` and then run ``mount /sys/fs/bpf``. This will cause the
+filesystem to be automatically mounted when the node boots.
+
+.. code:: bash
+
+     bpffs			/sys/fs/bpf		bpf	defaults 0 0
+
+If you are using systemd to manage the kubelet, see the section
+:ref:`bpffs_systemd`.
 
 Privileges
 ==========

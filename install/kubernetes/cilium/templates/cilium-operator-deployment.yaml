@@ -41,16 +41,10 @@ spec:
 {{- if or (ge .Capabilities.KubeVersion.Minor "14") (gt .Capabilities.KubeVersion.Major "1") }}
       # In HA mode, cilium-operator pods must not be scheduled on the same
       # node as they will clash with each other.
+  {{- if .Values.operator.affinity }}
       affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-              - key: io.cilium/app
-                operator: In
-                values:
-                - operator
-            topologyKey: "kubernetes.io/hostname"
+  {{- toYaml .Values.operator.affinity | trim | nindent 8 }}
+  {{- end }}
 {{- end }}
 {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -204,12 +198,12 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
 {{- end }}
       restartPolicy: Always
-{{- if or (and (eq .Release.Namespace "kube-system") (gt .Capabilities.KubeVersion.Minor "10")) (ge .Capabilities.KubeVersion.Minor "17") (gt .Capabilities.KubeVersion.Major "1")}}
+{{- if and (or (and (eq .Release.Namespace "kube-system") (gt .Capabilities.KubeVersion.Minor "10")) (ge .Capabilities.KubeVersion.Minor "17") (gt .Capabilities.KubeVersion.Major "1")) .Values.enableCriticalPriorityClass }}
       priorityClassName: system-cluster-critical
 {{- end }}
       serviceAccount: cilium-operator
       serviceAccountName: cilium-operator
-{{- with .Values.nodeSelector }}
+{{- with .Values.operator.nodeSelector }}
       nodeSelector:
         {{- toYaml . | trim | nindent 8 }}
 {{- end }}
@@ -249,6 +243,9 @@ spec:
 {{- range .Values.operator.extraHostPathMounts }}
       - name: {{ .name }}
         hostPath:
-          path: {{ .mountPath }}
+          path: {{ .hostPath }}
+{{- if .hostPathType }}
+          type: {{ .hostPathType }}
+{{- end }}
 {{- end }}
 {{- end }}

@@ -32,6 +32,7 @@ import (
 
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/timestamp"
+	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/google/gopacket/layers"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/sirupsen/logrus"
@@ -142,7 +143,8 @@ func (p *Parser) Decode(r *accesslog.LogRecord, decoded *pb.Flow) error {
 	decoded.DestinationNames = destinationNames
 	decoded.L7 = decodeLayer7(r)
 	decoded.L7.LatencyNs = p.computeResponseTime(r, timestamp)
-	decoded.Reply = decodeIsReply(r.Type)
+	decoded.IsReply = decodeIsReply(r.Type)
+	decoded.Reply = decoded.GetIsReply().GetValue()
 	decoded.EventType = decodeCiliumEventType(api.MessageTypeAccessLog)
 	decoded.SourceService = sourceService
 	decoded.DestinationService = destinationService
@@ -322,7 +324,7 @@ func decodeDNS(flowType accesslog.FlowType, dns *accesslog.LogRecordDNS) *pb.Lay
 
 func decodeHTTP(flowType accesslog.FlowType, http *accesslog.LogRecordHTTP) *pb.Layer7_Http {
 	var headers []*pb.HTTPHeader
-	var keys []string
+	keys := make([]string, 0, len(http.Headers))
 	for key := range http.Headers {
 		keys = append(keys, key)
 	}
@@ -399,8 +401,10 @@ func decodeLayer7(r *accesslog.LogRecord) *pb.Layer7 {
 	}
 }
 
-func decodeIsReply(t accesslog.FlowType) bool {
-	return t == accesslog.TypeResponse
+func decodeIsReply(t accesslog.FlowType) *wrappers.BoolValue {
+	return &wrappers.BoolValue{
+		Value: t == accesslog.TypeResponse,
+	}
 }
 
 func decodeCiliumEventType(eventType uint8) *pb.CiliumEventType {

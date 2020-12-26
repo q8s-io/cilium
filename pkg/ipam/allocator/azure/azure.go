@@ -36,7 +36,7 @@ var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "ipam-allocator-a
 type AllocatorAzure struct{}
 
 // Init in Azure implementation doesn't need to do anything
-func (*AllocatorAzure) Init() error { return nil }
+func (*AllocatorAzure) Init(ctx context.Context) error { return nil }
 
 // Start kicks of the Azure IP allocation
 func (*AllocatorAzure) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (allocator.NodeEventHandler, error) {
@@ -78,7 +78,7 @@ func (*AllocatorAzure) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (alloca
 		iMetrics = &ipamMetrics.NoOpMetrics{}
 	}
 
-	azureClient, err := azureAPI.NewClient(operatorOption.Config.AzureCloudName, subscriptionID, resourceGroupName, operatorOption.Config.AzureUserAssignedIdentityID, azMetrics, operatorOption.Config.IPAMAPIQPSLimit, operatorOption.Config.IPAMAPIBurst)
+	azureClient, err := azureAPI.NewClient(operatorOption.Config.AzureCloudName, subscriptionID, resourceGroupName, operatorOption.Config.AzureUserAssignedIdentityID, azMetrics, operatorOption.Config.IPAMAPIQPSLimit, operatorOption.Config.IPAMAPIBurst, operatorOption.Config.AzureUsePrimaryAddress)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create Azure client: %w", err)
 	}

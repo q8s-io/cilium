@@ -67,6 +67,18 @@ var _ = Describe("K8sServicesTest", func() {
 		ExpectWithOffset(1, err).Should(BeNil(), fmt.Sprintf("Error creating resource %s: %s", path, err))
 	}
 
+	getHTTPLink := func(host string, port int32) string {
+		return fmt.Sprintf("http://%s",
+			net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	}
+
+	getTFTPLink := func(host string, port int32) string {
+		// TFTP requires a filename. Otherwise the packet will be
+		// silently dropped by the server.
+		return fmt.Sprintf("tftp://%s/hello",
+			net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	}
+
 	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
 
@@ -120,20 +132,20 @@ var _ = Describe("K8sServicesTest", func() {
 		return backends
 	}
 
-	ciliumAddService := func(id int64, protocol string, frontend string, backends []string, svcType, trafficPolicy string) {
+	ciliumAddService := func(id int64, frontend string, backends []string, svcType, trafficPolicy string) {
 		ciliumPods, err := kubectl.GetCiliumPods()
 		ExpectWithOffset(1, err).To(BeNil(), "Cannot get cilium pods")
 		for _, pod := range ciliumPods {
-			err := kubectl.CiliumServiceAdd(pod, id, protocol, frontend, backends, svcType, trafficPolicy)
+			err := kubectl.CiliumServiceAdd(pod, id, frontend, backends, svcType, trafficPolicy)
 			ExpectWithOffset(1, err).To(BeNil(), "Failed to add cilium service")
 		}
 	}
 
-	ciliumAddServiceOnNode := func(node string, id int64, protocol string, frontend string, backends []string, svcType, trafficPolicy string) {
+	ciliumAddServiceOnNode := func(node string, id int64, frontend string, backends []string, svcType, trafficPolicy string) {
 		ciliumPod, err := kubectl.GetCiliumPodOnNode(node)
 		ExpectWithOffset(1, err).To(BeNil(), fmt.Sprintf("Cannot get cilium pod on node %s", node))
 
-		err = kubectl.CiliumServiceAdd(ciliumPod, id, protocol, frontend, backends, svcType, trafficPolicy)
+		err = kubectl.CiliumServiceAdd(ciliumPod, id, frontend, backends, svcType, trafficPolicy)
 		ExpectWithOffset(1, err).To(BeNil(), fmt.Sprintf("Failed to add cilium service on node %s", node))
 	}
 
@@ -202,12 +214,8 @@ var _ = Describe("K8sServicesTest", func() {
 	})
 
 	testCurlFromPods := func(clientPodLabel, url string, count, fails int) {
-		// A DS with client is running in each node. So we try from each node
-		// that can connect to the service.  To make sure that the cross-node
-		// service connectivity is correct we tried 10 times, so balance in the
-		// two nodes
 		pods, err := kubectl.GetPodNames(helpers.DefaultNamespace, clientPodLabel)
-		ExpectWithOffset(1, err).Should(BeNil(), "cannot retrieve pod names by filter %q", testDSClient)
+		ExpectWithOffset(1, err).Should(BeNil(), "cannot retrieve pod names by filter %q", clientPodLabel)
 		cmd := testCommand(helpers.CurlFailNoStats(url), count, fails)
 		for _, pod := range pods {
 			By("Making %d curl requests from %s pod to service %s", count, pod, url)
@@ -215,6 +223,34 @@ var _ = Describe("K8sServicesTest", func() {
 			ExpectWithOffset(1, res).Should(helpers.CMDSuccess(), "Request from %s pod to service %s failed", pod, url)
 		}
 	}
+
+	testCurlFromPodWithSourceIPCheck :=
+		func(clientPodLabel, url string, count int, sourceIP string) {
+			var cmd string
+
+			pods, err := kubectl.GetPodNames(helpers.DefaultNamespace, clientPodLabel)
+			ExpectWithOffset(1, err).Should(BeNil(), "cannot retrieve pod names by filter %s", clientPodLabel)
+
+			By("Making %d HTTP requests from pods(%v) to %s", count, pods, url)
+			for _, pod := range pods {
+				for i := 1; i <= count; i++ {
+					cmd = helpers.CurlFail(url)
+					if sourceIP != "" {
+						cmd += " | grep client_address="
+					}
+
+					res := kubectl.ExecPodCmd(helpers.DefaultNamespace, pod, cmd)
+					ExpectWithOffset(1, res).Should(helpers.CMDSuccess(),
+						"Can not connect to url %q from pod(%s)", url, pod)
+					if sourceIP != "" {
+						// Parse the IPs to avoid issues with 4-in-6 formats
+						outIP := net.ParseIP(strings.TrimSpace(strings.Split(res.Stdout(), "=")[1]))
+						srcIP := net.ParseIP(sourceIP)
+						ExpectWithOffset(1, outIP).To(Equal(srcIP))
+					}
+				}
+			}
+		}
 
 	testCurlFromPodsFail := func(clientPodLabel, url string) {
 		pods, err := kubectl.GetPodNames(helpers.DefaultNamespace, clientPodLabel)
@@ -324,14 +360,14 @@ var _ = Describe("K8sServicesTest", func() {
 			BeforeAll(func() {
 				// Installs the IPv6 equivalent of app1-service (demo.yaml)
 				httpBackends := ciliumIPv6Backends("-l k8s:id=app1,k8s:io.kubernetes.pod.namespace=default", "80")
-				ciliumAddService(10080, "tcp", net.JoinHostPort(demoClusterIPv6, "80"), httpBackends, "ClusterIP", "Cluster")
+				ciliumAddService(10080, net.JoinHostPort(demoClusterIPv6, "80"), httpBackends, "ClusterIP", "Cluster")
 				tftpBackends := ciliumIPv6Backends("-l k8s:id=app1,k8s:io.kubernetes.pod.namespace=default", "69")
-				ciliumAddService(10069, "udp", net.JoinHostPort(demoClusterIPv6, "69"), tftpBackends, "ClusterIP", "Cluster")
+				ciliumAddService(10069, net.JoinHostPort(demoClusterIPv6, "69"), tftpBackends, "ClusterIP", "Cluster")
 				// Installs the IPv6 equivalent of echo (echo-svc.yaml)
 				httpBackends = ciliumIPv6Backends("-l k8s:name=echo,k8s:io.kubernetes.pod.namespace=default", "80")
-				ciliumAddService(20080, "tcp", net.JoinHostPort(echoClusterIPv6, "80"), httpBackends, "ClusterIP", "Cluster")
+				ciliumAddService(20080, net.JoinHostPort(echoClusterIPv6, "80"), httpBackends, "ClusterIP", "Cluster")
 				tftpBackends = ciliumIPv6Backends("-l k8s:name=echo,k8s:io.kubernetes.pod.namespace=default", "69")
-				ciliumAddService(20069, "udp", net.JoinHostPort(echoClusterIPv6, "69"), tftpBackends, "ClusterIP", "Cluster")
+				ciliumAddService(20069, net.JoinHostPort(echoClusterIPv6, "69"), tftpBackends, "ClusterIP", "Cluster")
 			})
 
 			AfterAll(func() {
@@ -347,7 +383,7 @@ var _ = Describe("K8sServicesTest", func() {
 				status.ExpectSuccess("cannot curl to service IP from host")
 
 				status = kubectl.ExecInHostNetNS(context.TODO(), k8s1NodeName,
-					helpers.CurlFail(`"tftp://[%s]/hell"`, demoClusterIPv6))
+					helpers.CurlFail(`"tftp://[%s]/hello"`, demoClusterIPv6))
 				status.ExpectSuccess("cannot curl to service IP from host")
 			})
 
@@ -373,7 +409,7 @@ var _ = Describe("K8sServicesTest", func() {
 			res := kubectl.Exec(fmt.Sprintf("kubectl label services/%s %s=%s", echoServiceName, serviceProxyLabelName, "dummy-lb"))
 			res.ExpectSuccess("cannot label service")
 
-			// Wait for all cilium pods to remove the serivce from its list.
+			// Wait for all cilium pods to remove the service from its list.
 			By("Validating that Cilium is not handling the service")
 			Eventually(func() int {
 				validPods := 0
@@ -433,11 +469,16 @@ var _ = Describe("K8sServicesTest", func() {
 			deploymentYAML string
 			lrpSvcYAML     string
 			svcIP          string
-			curlTCP        string
-			curlUDP        string
+			curl4TCP       string
+			curl4UDP       string
+			curl4in6TCP    string
+			curl4in6UDP    string
 		)
 
 		BeforeAll(func() {
+			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+				"localRedirectPolicy": "true",
+			})
 			deploymentYAML = helpers.ManifestGet(kubectl.BasePath(), "lrp-test.yaml")
 			lrpSvcYAML = helpers.ManifestGet(kubectl.BasePath(), "lrp-svc.yaml")
 			res := kubectl.ApplyDefault(deploymentYAML)
@@ -449,10 +490,16 @@ var _ = Describe("K8sServicesTest", func() {
 			clusterIP, _, err := kubectl.GetServiceHostPort(helpers.DefaultNamespace, lrpServiceName)
 			svcIP = clusterIP
 			Expect(err).To(BeNil(), "Cannot get svc IP")
-			httpSVCURL := fmt.Sprintf("http://%s/", svcIP)
-			tftpSVCURL := fmt.Sprintf("tftp://%s/hello", svcIP)
-			curlTCP = helpers.CurlFailNoStats(httpSVCURL)
-			curlUDP = helpers.CurlFailNoStats(tftpSVCURL)
+
+			http4SVCURL := getHTTPLink(svcIP, 80)
+			tftp4SVCURL := getTFTPLink(svcIP, 69)
+			http4in6SVCURL := getHTTPLink("::ffff:"+svcIP, 80)
+			tftp4in6SVCURL := getTFTPLink("::ffff:"+svcIP, 69)
+
+			curl4TCP = helpers.CurlFailNoStats(http4SVCURL)
+			curl4UDP = helpers.CurlFailNoStats(tftp4SVCURL)
+			curl4in6TCP = helpers.CurlFailNoStats(http4in6SVCURL)
+			curl4in6UDP = helpers.CurlFailNoStats(tftp4in6SVCURL)
 		})
 
 		AfterAll(func() {
@@ -477,7 +524,7 @@ var _ = Describe("K8sServicesTest", func() {
 			}{
 				{
 					selector: "id=app1",
-					cmd:      curlTCP,
+					cmd:      curl4TCP,
 					// Expects to see local backend name in returned Hostname field
 					want: be1Name,
 					// Expects never to see remote backend name in returned Hostname field
@@ -485,19 +532,43 @@ var _ = Describe("K8sServicesTest", func() {
 				},
 				{
 					selector: "id=app2",
-					cmd:      curlTCP,
+					cmd:      curl4TCP,
 					want:     be2Name,
 					notWant:  be1Name,
 				},
 				{
 					selector: "id=app1",
-					cmd:      curlUDP,
+					cmd:      curl4UDP,
 					want:     be1Name,
 					notWant:  be2Name,
 				},
 				{
 					selector: "id=app2",
-					cmd:      curlUDP,
+					cmd:      curl4UDP,
+					want:     be2Name,
+					notWant:  be1Name,
+				},
+				{
+					selector: "id=app1",
+					cmd:      curl4in6TCP,
+					want:     be1Name,
+					notWant:  be2Name,
+				},
+				{
+					selector: "id=app2",
+					cmd:      curl4in6TCP,
+					want:     be2Name,
+					notWant:  be1Name,
+				},
+				{
+					selector: "id=app1",
+					cmd:      curl4in6UDP,
+					want:     be1Name,
+					notWant:  be2Name,
+				},
+				{
+					selector: "id=app2",
+					cmd:      curl4in6UDP,
 					want:     be2Name,
 					notWant:  be1Name,
 				},
@@ -536,19 +607,19 @@ var _ = Describe("K8sServicesTest", func() {
 			}{
 				{
 					selector: "id=app1",
-					cmd:      curlTCP,
+					cmd:      curl4TCP,
 				},
 				{
 					selector: "id=app2",
-					cmd:      curlTCP,
+					cmd:      curl4TCP,
 				},
 				{
 					selector: "id=app1",
-					cmd:      curlUDP,
+					cmd:      curl4UDP,
 				},
 				{
 					selector: "id=app2",
-					cmd:      curlUDP,
+					cmd:      curl4UDP,
 				},
 			}
 			for _, tc := range testCases {
@@ -610,9 +681,9 @@ var _ = Describe("K8sServicesTest", func() {
 			BeforeAll(func() {
 				// Install rules for testds-service (demo_ds.yaml)
 				httpBackends := ciliumIPv6Backends("-l k8s:zgroup=testDS,k8s:io.kubernetes.pod.namespace=default", "80")
-				ciliumAddService(31080, "tcp", net.JoinHostPort(testDSIPv6, "80"), httpBackends, "ClusterIP", "Cluster")
+				ciliumAddService(31080, net.JoinHostPort(testDSIPv6, "80"), httpBackends, "ClusterIP", "Cluster")
 				tftpBackends := ciliumIPv6Backends("-l k8s:zgroup=testDS,k8s:io.kubernetes.pod.namespace=default", "69")
-				ciliumAddService(31069, "udp", net.JoinHostPort(testDSIPv6, "69"), tftpBackends, "ClusterIP", "Cluster")
+				ciliumAddService(31069, net.JoinHostPort(testDSIPv6, "69"), tftpBackends, "ClusterIP", "Cluster")
 			})
 
 			AfterAll(func() {
@@ -628,18 +699,6 @@ var _ = Describe("K8sServicesTest", func() {
 				testCurlFromPods(testDSClient, url, 10, 0)
 			})
 		})
-
-		getHTTPLink := func(host string, port int32) string {
-			return fmt.Sprintf("http://%s",
-				net.JoinHostPort(host, fmt.Sprintf("%d", port)))
-		}
-
-		getTFTPLink := func(host string, port int32) string {
-			// TFTP requires a filename. Otherwise the packet will be
-			// silently dropped by the server.
-			return fmt.Sprintf("tftp://%s/hello",
-				net.JoinHostPort(host, fmt.Sprintf("%d", port)))
-		}
 
 		testCurlFromPodInHostNetNS := func(url string, count, fails int, fromPod string) {
 			By("Making %d curl requests from pod (host netns) %s to %q", count, fromPod, url)
@@ -718,7 +777,7 @@ var _ = Describe("K8sServicesTest", func() {
 		}
 
 		// srcPod:     Name of pod sending the datagram
-		// srcPort:    Source UDP port
+		// srcPort:    Source UDP port (should be different for each doFragmentRequest invocation to allow distinct CT table entries)
 		// dstPodIP:   Receiver pod IP (for checking in CT table)
 		// dstPodPort: Receiver pod port (for checking in CT table)
 		// dstIP:      Target endpoint IP for sending the datagram
@@ -783,6 +842,9 @@ var _ = Describe("K8sServicesTest", func() {
 				countOutK8s2, _ = strconv.Atoi(strings.TrimSpace(res.Stdout()))
 			}
 
+			fragmentedPacketsBeforeK8s1, _ := helpers.GetBPFPacketsCount(kubectl, ciliumPodK8s1, "Fragmented packet", "INGRESS")
+			fragmentedPacketsBeforeK8s2, _ := helpers.GetBPFPacketsCount(kubectl, ciliumPodK8s2, "Fragmented packet", "INGRESS")
+
 			// Send datagram
 			By("Sending a fragmented packet from %s to endpoint %s", srcPod, net.JoinHostPort(dstIP, fmt.Sprintf("%d", dstPort)))
 			cmd := fmt.Sprintf("bash -c 'dd if=/dev/zero bs=%d count=%d | nc -u -w 1 -p %d %s %d'", blockSize, blockCount, srcPort, dstIP, dstPort)
@@ -828,6 +890,14 @@ var _ = Describe("K8sServicesTest", func() {
 				Equal([]int{countOutK8s1, countOutK8s2 + delta}),
 				Equal([]int{countOutK8s1 + delta, countOutK8s2}),
 			), "Failed to account for IPv4 fragments to %s (out)", dstIP)
+
+			fragmentedPacketsAfterK8s1, _ := helpers.GetBPFPacketsCount(kubectl, ciliumPodK8s1, "Fragmented packet", "INGRESS")
+			fragmentedPacketsAfterK8s2, _ := helpers.GetBPFPacketsCount(kubectl, ciliumPodK8s2, "Fragmented packet", "INGRESS")
+
+			ExpectWithOffset(2, []int{fragmentedPacketsAfterK8s1, fragmentedPacketsAfterK8s2}).To(SatisfyAny(
+				Equal([]int{fragmentedPacketsBeforeK8s1, fragmentedPacketsBeforeK8s2 + delta}),
+				Equal([]int{fragmentedPacketsBeforeK8s1 + delta, fragmentedPacketsBeforeK8s2}),
+			), "Failed to account for INGRESS IPv4 fragments in BPF metrics", dstIP)
 		}
 
 		getIPv4AddrForIface := func(nodeName, iface string) string {
@@ -914,7 +984,7 @@ var _ = Describe("K8sServicesTest", func() {
 				}...)
 			}
 
-			if helpers.GetCurrentIntegration() == helpers.CIIntegrationGKE {
+			if helpers.RunsOnGKE() {
 				// Testing LoadBalancer types subject to bpf_sock.
 				lbIP, err := kubectl.GetLoadBalancerIP(helpers.DefaultNamespace, "test-lb", 60*time.Second)
 				Expect(err).Should(BeNil(), "Cannot retrieve loadbalancer IP for test-lb")
@@ -1477,6 +1547,56 @@ var _ = Describe("K8sServicesTest", func() {
 			}
 		}
 
+		SkipContextIf(func() bool {
+			return helpers.RunsWithoutKubeProxy() || helpers.GetCurrentIntegration() != ""
+		}, "IPv6 masquerading", func() {
+			var (
+				k8s2NodeIP      string
+				k8s1EndpointIPs map[string]string
+
+				testDSK8s1IPv6 string = "fd03::310"
+			)
+
+			BeforeAll(func() {
+				DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+					"tunnel":               "disabled",
+					"autoDirectNodeRoutes": "true",
+				})
+
+				privateIface, err := kubectl.GetPrivateIface()
+				Expect(err).Should(BeNil(), "Cannot determine private iface")
+
+				k8s2NodeIP = getIPv6AddrForIface(k8s2NodeName, privateIface)
+				Expect(k8s2NodeIP).ToNot(BeEmpty(), "Cannot get primary IPv6 address for K8s2 node")
+
+				pod, err := kubectl.GetCiliumPodOnNode(helpers.K8s1)
+				Expect(err).Should(BeNil(), "Cannot get cilium pod on node %s", helpers.K8s1)
+				k8s1EndpointIPs = kubectl.CiliumEndpointIPv6(pod, "-l k8s:zgroup=testDS,k8s:io.kubernetes.pod.namespace=default")
+
+				k8s1Backends := []string{}
+				for _, epIP := range k8s1EndpointIPs {
+					k8s1Backends = append(k8s1Backends, net.JoinHostPort(epIP, "80"))
+				}
+
+				ciliumAddService(31080, net.JoinHostPort(testDSK8s1IPv6, "80"), k8s1Backends, "ClusterIP", "Cluster")
+			})
+
+			It("across K8s nodes", func() {
+				url := fmt.Sprintf(`"http://[%s]:80/"`, testDSK8s1IPv6)
+				testCurlFromPodWithSourceIPCheck(testDSK8s2, url, 5, k8s2NodeIP)
+
+				for _, epIP := range k8s1EndpointIPs {
+					url = fmt.Sprintf(`"http://[%s]:80/"`, epIP)
+					testCurlFromPodWithSourceIPCheck(testDSK8s2, url, 5, k8s2NodeIP)
+				}
+			})
+
+			AfterAll(func() {
+				ciliumDelService(31080)
+				DeployCiliumAndDNS(kubectl, ciliumFilename)
+			})
+		})
+
 		SkipItIf(helpers.RunsWithoutKubeProxy, "Tests NodePort (kube-proxy) with externalTrafficPolicy=Local", func() {
 			DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
 				// When kube-proxy is enabled, the host firewall is not
@@ -1515,21 +1635,21 @@ var _ = Describe("K8sServicesTest", func() {
 
 				// Install rules for testds-service NodePort Service(demo_ds.yaml)
 				httpBackends := ciliumIPv6Backends("-l k8s:zgroup=testDS,k8s:io.kubernetes.pod.namespace=default", "80")
-				ciliumAddService(31080, string(data.Spec.Ports[0].Protocol), net.JoinHostPort(testDSIPv6, fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)), httpBackends, "NodePort", "Cluster")
-				ciliumAddService(31081, string(data.Spec.Ports[0].Protocol), net.JoinHostPort("::", fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)), httpBackends, "NodePort", "Cluster")
+				ciliumAddService(31080, net.JoinHostPort(testDSIPv6, fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)), httpBackends, "NodePort", "Cluster")
+				ciliumAddService(31081, net.JoinHostPort("::", fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)), httpBackends, "NodePort", "Cluster")
 				// Add service corresponding to IPv6 address of the nodes so that they become
 				// reachable from outside the cluster.
-				ciliumAddServiceOnNode(helpers.K8s1, 31082, string(data.Spec.Ports[0].Protocol), net.JoinHostPort(k8s1IPv6, fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)),
+				ciliumAddServiceOnNode(helpers.K8s1, 31082, net.JoinHostPort(k8s1IPv6, fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)),
 					httpBackends, "NodePort", "Cluster")
-				ciliumAddServiceOnNode(helpers.K8s2, 31082, string(data.Spec.Ports[0].Protocol), net.JoinHostPort(k8s2IPv6, fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)),
+				ciliumAddServiceOnNode(helpers.K8s2, 31082, net.JoinHostPort(k8s2IPv6, fmt.Sprintf("%d", data.Spec.Ports[0].NodePort)),
 					httpBackends, "NodePort", "Cluster")
 
 				tftpBackends := ciliumIPv6Backends("-l k8s:zgroup=testDS,k8s:io.kubernetes.pod.namespace=default", "69")
-				ciliumAddService(31069, string(data.Spec.Ports[1].Protocol), net.JoinHostPort(testDSIPv6, fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)), tftpBackends, "NodePort", "Cluster")
-				ciliumAddService(31070, string(data.Spec.Ports[1].Protocol), net.JoinHostPort("::", fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)), tftpBackends, "NodePort", "Cluster")
-				ciliumAddServiceOnNode(helpers.K8s1, 31071, string(data.Spec.Ports[1].Protocol), net.JoinHostPort(k8s1IPv6, fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)),
+				ciliumAddService(31069, net.JoinHostPort(testDSIPv6, fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)), tftpBackends, "NodePort", "Cluster")
+				ciliumAddService(31070, net.JoinHostPort("::", fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)), tftpBackends, "NodePort", "Cluster")
+				ciliumAddServiceOnNode(helpers.K8s1, 31071, net.JoinHostPort(k8s1IPv6, fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)),
 					tftpBackends, "NodePort", "Cluster")
-				ciliumAddServiceOnNode(helpers.K8s2, 31071, string(data.Spec.Ports[1].Protocol), net.JoinHostPort(k8s2IPv6, fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)),
+				ciliumAddServiceOnNode(helpers.K8s2, 31071, net.JoinHostPort(k8s2IPv6, fmt.Sprintf("%d", data.Spec.Ports[1].NodePort)),
 					tftpBackends, "NodePort", "Cluster")
 			})
 
@@ -1778,11 +1898,14 @@ var _ = Describe("K8sServicesTest", func() {
 
 						BeforeAll(func() {
 							DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-								"nodePort.algorithm": "maglev",
+								"loadBalancer.algorithm": "maglev",
 								// The echo svc has two backends. the closest supported
 								// prime number which is greater than 100 * |backends_count|
 								// is 251.
 								"maglev.tableSize": "251",
+								// Support for host firewall + Maglev is currently broken,
+								// see #14047 for details.
+								"hostFirewall": "false",
 							})
 
 							echoYAML = helpers.ManifestGet(kubectl.BasePath(), "echo-svc.yaml")
@@ -1903,13 +2026,16 @@ var _ = Describe("K8sServicesTest", func() {
 
 						BeforeAll(func() {
 							DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-								"tunnel":               "disabled",
-								"autoDirectNodeRoutes": "true",
-								"nodePort.algorithm":   "maglev",
+								"tunnel":                 "disabled",
+								"autoDirectNodeRoutes":   "true",
+								"loadBalancer.algorithm": "maglev",
 								// The echo svc has two backends. the closest supported
 								// prime number which is greater than 100 * |backends_count|
 								// is 251.
 								"maglev.tableSize": "251",
+								// Support for host firewall + Maglev is currently broken,
+								// see #14047 for details.
+								"hostFirewall": "false",
 							})
 
 							echoYAML = helpers.ManifestGet(kubectl.BasePath(), "echo-svc.yaml")
@@ -1937,7 +2063,7 @@ var _ = Describe("K8sServicesTest", func() {
 							DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
 								"tunnel":               "disabled",
 								"autoDirectNodeRoutes": "true",
-								"nodePort.mode":        "snat",
+								"loadBalancer.mode":    "snat",
 								"devices":              fmt.Sprintf(`'{%s,%s}'`, privateIface, helpers.SecondaryIface),
 							})
 
@@ -2047,7 +2173,7 @@ var _ = Describe("K8sServicesTest", func() {
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with direct routing and DSR", func() {
 					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-						"nodePort.mode":        "dsr",
+						"loadBalancer.mode":    "dsr",
 						"tunnel":               "disabled",
 						"autoDirectNodeRoutes": "true",
 					})
@@ -2056,46 +2182,98 @@ var _ = Describe("K8sServicesTest", func() {
 					testNodePort(true, false, false, 0) // no need to test from outside, as testDSR did it
 				})
 
-				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing and SNAT", func() {
+				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, SNAT and Random", func() {
 					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-						"nodePort.acceleration": "testing-only",
-						"nodePort.mode":         "snat",
-						"tunnel":                "disabled",
-						"autoDirectNodeRoutes":  "true",
-						"devices":               fmt.Sprintf(`'{%s}'`, privateIface),
+						"loadBalancer.acceleration": "testing-only",
+						"loadBalancer.mode":         "snat",
+						"loadBalancer.algorithm":    "random",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
 					})
 					testNodePortExternal(false, false)
 				})
 
-				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing and Hybrid", func() {
+				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, SNAT and Maglev", func() {
 					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-						"nodePort.acceleration": "testing-only",
-						"nodePort.mode":         "hybrid",
-						"tunnel":                "disabled",
-						"autoDirectNodeRoutes":  "true",
-						"devices":               fmt.Sprintf(`'{%s}'`, privateIface),
+						"loadBalancer.acceleration": "testing-only",
+						"loadBalancer.mode":         "snat",
+						"loadBalancer.algorithm":    "maglev",
+						"maglev.tableSize":          "251",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
+						// Support for host firewall + Maglev is currently broken,
+						// see #14047 for details.
+						"hostFirewall": "false",
+					})
+					testNodePortExternal(false, false)
+				})
+
+				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, Hybrid and Random", func() {
+					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+						"loadBalancer.acceleration": "testing-only",
+						"loadBalancer.mode":         "hybrid",
+						"loadBalancer.algorithm":    "random",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
 					})
 					testNodePortExternal(true, false)
 				})
 
-				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing and DSR", func() {
+				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, Hybrid and Maglev", func() {
 					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-						"nodePort.acceleration": "testing-only",
-						"nodePort.mode":         "dsr",
-						"tunnel":                "disabled",
-						"autoDirectNodeRoutes":  "true",
-						"devices":               fmt.Sprintf(`'{%s}'`, privateIface),
+						"loadBalancer.acceleration": "testing-only",
+						"loadBalancer.mode":         "hybrid",
+						"loadBalancer.algorithm":    "maglev",
+						"maglev.tableSize":          "251",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
+						// Support for host firewall + Maglev is currently broken,
+						// see #14047 for details.
+						"hostFirewall": "false",
+					})
+					testNodePortExternal(true, false)
+				})
+
+				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, DSR and Random", func() {
+					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+						"loadBalancer.acceleration": "testing-only",
+						"loadBalancer.mode":         "dsr",
+						"loadBalancer.algorithm":    "random",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
+					})
+					testNodePortExternal(true, true)
+				})
+
+				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, DSR and Maglev", func() {
+					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+						"loadBalancer.acceleration": "testing-only",
+						"loadBalancer.mode":         "dsr",
+						"loadBalancer.algorithm":    "maglev",
+						"maglev.tableSize":          "251",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
+						// Support for host firewall + Maglev is currently broken,
+						// see #14047 for details.
+						"hostFirewall": "false",
 					})
 					testNodePortExternal(true, true)
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with TC, direct routing and Hybrid", func() {
 					DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
-						"nodePort.acceleration": "disabled",
-						"nodePort.mode":         "hybrid",
-						"tunnel":                "disabled",
-						"autoDirectNodeRoutes":  "true",
-						"devices":               fmt.Sprintf(`'{}'`), // Revert back to auto-detection after XDP.
+						"loadBalancer.acceleration": "disabled",
+						"loadBalancer.mode":         "hybrid",
+						"loadBalancer.algorithm":    "random",
+						"tunnel":                    "disabled",
+						"autoDirectNodeRoutes":      "true",
+						"devices":                   fmt.Sprintf(`'{}'`), // Revert back to auto-detection after XDP.
 					})
 					testNodePortExternal(true, false)
 				})
